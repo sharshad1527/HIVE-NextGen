@@ -6,6 +6,7 @@ import subprocess
 import re
 import struct
 import json
+from collections import deque
 from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 from core.app_config import app_config
@@ -22,7 +23,6 @@ class WaveformGeneratorThread(QThread):
         self.json_path = self.cache_dir / f"{file_hash}_wave.json"
 
     def run(self):
-        # 1. Attempt to load from JSON cache if it already exists
         if self.json_path.exists():
             try:
                 with open(self.json_path, 'r') as f:
@@ -32,15 +32,17 @@ class WaveformGeneratorThread(QThread):
             except Exception:
                 pass
 
-        # 2. Extract mono, 800 Hz, 16-bit PCM using FFmpeg. 
-        # Downsampling to 800Hz directly saves extreme amounts of memory/CPU for long files.
         cmd = [
             "ffmpeg", "-y", "-i", self.file_path,
             "-vn", "-ac", "1", "-ar", "800", "-f", "s16le", "-"
         ]
         
         try:
-            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            kwargs = {}
+            if os.name == 'nt':
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+                
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **kwargs)
             raw_data, _ = process.communicate()
             
             if not raw_data:
@@ -50,7 +52,6 @@ class WaveformGeneratorThread(QThread):
             count = len(raw_data) // 2
             samples = struct.unpack(f"<{count}h", raw_data)
             
-            # For ~50 visual peaks per second at 800 Hz: chunk by 16 samples.
             chunk_size = 16 
             peaks = []
             for i in range(0, len(samples), chunk_size):
@@ -58,7 +59,6 @@ class WaveformGeneratorThread(QThread):
                 if chunk:
                     peaks.append(max(abs(s) for s in chunk))
             
-            # Normalize height strictly between 0 and 100 for the UI
             max_peak = max(peaks) if peaks else 1
             if max_peak == 0: max_peak = 1
             normalized = [int((p / max_peak) * 100) for p in peaks]
@@ -75,9 +75,9 @@ class WaveformGeneratorThread(QThread):
 
 class ProxyGeneratorThread(QThread):
     """Background thread to transcode 4K/Heavy videos to 360p proxies using FFmpeg."""
-    progress_updated = Signal(str, int)  # file_path, percentage (0-100)
-    proxy_finished = Signal(str, str)    # original_path, proxy_path
-    proxy_failed = Signal(str, str)      # original_path, error_message
+    progress_updated = Signal(str, int)  
+    proxy_finished = Signal(str, str)    
+    proxy_failed = Signal(str, str)      
 
     def __init__(self, file_path, cache_dir):
         super().__init__()
@@ -88,37 +88,42 @@ class ProxyGeneratorThread(QThread):
         self.proxy_path = str(self.cache_dir / f"{file_hash}_proxy.mp4")
 
     def get_video_duration(self, file_path):
-        """Uses ffprobe to get the exact duration of the video in seconds."""
         cmd = [
             "ffprobe", "-v", "error", "-show_entries", 
             "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", 
             file_path
         ]
         try:
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            kwargs = {}
+            if os.name == 'nt':
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, **kwargs)
             return float(result.stdout.strip())
         except Exception:
             return 0.0
 
     def _get_hw_encoder(self):
-        """Queries FFmpeg to find available hardware encoders on the host machine."""
         try:
-            result = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True)
+            kwargs = {}
+            if os.name == 'nt':
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            result = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True, **kwargs)
             output = result.stdout.lower()
             
-            if "h264_nvenc" in output: return "h264_nvenc"             # NVIDIA
-            if "h264_videotoolbox" in output: return "h264_videotoolbox" # Mac Silicon
-            if "h264_amf" in output: return "h264_amf"               # AMD
-            if "h264_qsv" in output: return "h264_qsv"               # Intel QuickSync
+            if "h264_nvenc" in output: return "h264_nvenc"             
+            if "h264_videotoolbox" in output: return "h264_videotoolbox" 
+            if "h264_amf" in output: return "h264_amf"               
+            if "h264_qsv" in output: return "h264_qsv"               
         except Exception as e:
             print(f"Could not probe FFmpeg encoders: {e}")
-            
         return None
 
     def _execute_ffmpeg(self, cmd, total_duration):
-        """Runs the FFmpeg command, parses progress, and returns True if successful."""
         try:
-            process = subprocess.Popen(cmd, stderr=subprocess.PIPE, universal_newlines=True)
+            kwargs = {}
+            if os.name == 'nt':
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            process = subprocess.Popen(cmd, stderr=subprocess.PIPE, universal_newlines=True, **kwargs)
             time_regex = re.compile(r"time=(\d{2}):(\d{2}):(\d{2}\.\d+)")
 
             for line in process.stderr:
@@ -130,7 +135,6 @@ class ProxyGeneratorThread(QThread):
                     
                     current_seconds = (hours * 3600) + (mins * 60) + secs
                     percentage = int((current_seconds / total_duration) * 100)
-                    
                     percentage = max(0, min(100, percentage))
                     self.progress_updated.emit(self.file_path, percentage)
 
@@ -141,7 +145,6 @@ class ProxyGeneratorThread(QThread):
             return False
 
     def run(self):
-        # Skip if proxy already exists
         if os.path.exists(self.proxy_path):
             self.progress_updated.emit(self.file_path, 100)
             self.proxy_finished.emit(self.file_path, self.proxy_path)
@@ -152,7 +155,6 @@ class ProxyGeneratorThread(QThread):
             self.proxy_failed.emit(self.file_path, "Could not determine video duration. FFmpeg may not be installed.")
             return
 
-        # Read settings from config
         res_setting = app_config.get_setting("proxy_resolution", "360p")
         height = res_setting.replace("p", "")
         hw_enabled = app_config.get_setting("hardware_acceleration", True)
@@ -160,19 +162,17 @@ class ProxyGeneratorThread(QThread):
         encoder = "libx264"
         preset_args = ["-preset", "ultrafast", "-crf", "28"]
         
-        # 1. Determine HW Encoder if enabled
         if hw_enabled:
             hw_enc = self._get_hw_encoder()
             if hw_enc:
                 encoder = hw_enc
                 if encoder == "h264_nvenc":
-                    preset_args = ["-preset", "p1", "-cq", "28"] # NVIDIA fastest preset
+                    preset_args = ["-preset", "p1", "-cq", "28"] 
                 elif encoder == "h264_videotoolbox":
-                    preset_args = ["-q:v", "50"] # Mac Hardware
+                    preset_args = ["-q:v", "50"] 
                 elif encoder in ["h264_amf", "h264_qsv"]:
-                    preset_args = ["-preset", "fast", "-q:v", "28"] # AMD/Intel
+                    preset_args = ["-preset", "fast", "-q:v", "28"] 
 
-        # 2. Build initial command
         cmd = [
             "ffmpeg", "-y", 
             "-i", self.file_path,
@@ -186,10 +186,8 @@ class ProxyGeneratorThread(QThread):
         print(f"Proxy Thread: Attempting to generate proxy using '{encoder}'...")
         success = self._execute_ffmpeg(cmd, total_duration)
 
-        # 3. SMART FALLBACK: If hardware acceleration fails, seamlessly retry with CPU
         if not success and encoder != "libx264":
             print(f"Proxy Thread: Hardware Encoder '{encoder}' failed! Falling back to CPU (libx264)...")
-            
             cmd = [
                 "ffmpeg", "-y", 
                 "-i", self.file_path,
@@ -200,7 +198,6 @@ class ProxyGeneratorThread(QThread):
             ]
             success = self._execute_ffmpeg(cmd, total_duration)
 
-        # 4. Final signal dispatch
         if success:
             self.progress_updated.emit(self.file_path, 100)
             self.proxy_finished.emit(self.file_path, self.proxy_path)
@@ -212,7 +209,6 @@ class MediaManager:
     """Handles parsing files, extracting metadata, generating thumbnails, and proxy queues."""
     
     def __init__(self):
-        # We rely on the core ~/.hive_editor folders
         self.config_dir = Path.home() / ".hive_editor"
         self.thumb_dir = self.config_dir / "thumbnails"
         self.proxy_dir = self.config_dir / "proxies" 
@@ -220,17 +216,16 @@ class MediaManager:
         self.thumb_dir.mkdir(parents=True, exist_ok=True)
         self.proxy_dir.mkdir(parents=True, exist_ok=True)
         
-        # Keep references to threads so PySide6 doesn't destroy them
+        self.proxy_queue = deque()
         self.active_proxy_threads = set()
+        self.max_concurrent_proxies = 2 # Strictly enforces limit to protect OS resources
 
     def process_file(self, file_path):
-        """Analyzes a file and returns UI-ready metadata and a thumbnail."""
         if not os.path.exists(file_path):
             return None
             
         ext = os.path.splitext(file_path)[1].lower()
         
-        # Categorize
         if ext in ['.mp4', '.mov', '.avi', '.mkv', '.webm']:
             media_type = 'video'
             icon = 'mdi6.movie-open-outline'
@@ -244,12 +239,10 @@ class MediaManager:
             media_type = 'unknown'
             icon = 'mdi6.file-outline'
 
-        # Generate Thumbnail (Images and Videos)
         thumb_path = None
         if media_type == 'image':
-            thumb_path = file_path # Direct path for images
+            thumb_path = file_path 
         elif media_type == 'video':
-            # Hash the path so we only generate the thumbnail once
             file_hash = hashlib.md5(file_path.encode()).hexdigest()
             thumb_path = str(self.thumb_dir / f"{file_hash}.jpg")
             
@@ -259,7 +252,6 @@ class MediaManager:
                     cap = cv2.VideoCapture(file_path)
                     ret, frame = cap.read()
                     if ret:
-                        # Resize to make it extremely lightweight for the UI
                         frame = cv2.resize(frame, (145, 80))
                         cv2.imwrite(thumb_path, frame)
                     cap.release()
@@ -279,33 +271,56 @@ class MediaManager:
         }
 
     def start_proxy_generation(self, file_path, on_progress_callback, on_finish_callback, on_fail_callback=None):
-        """Spawns the worker thread to transcode a heavy video to proxy format."""
-        thread = ProxyGeneratorThread(file_path, self.proxy_dir)
+        """Pushes a heavy video proxy request into the queue."""
+        task = {
+            "file_path": file_path,
+            "on_progress_callback": on_progress_callback,
+            "on_finish_callback": on_finish_callback,
+            "on_fail_callback": on_fail_callback
+        }
+        self.proxy_queue.append(task)
+        self._process_next_proxy()
+
+    def _process_next_proxy(self):
+        """Spawns the worker thread if we are beneath the CPU resource cap."""
+        if len(self.active_proxy_threads) >= self.max_concurrent_proxies:
+            return
+            
+        if not self.proxy_queue:
+            return
+            
+        task = self.proxy_queue.popleft()
+        
+        thread = ProxyGeneratorThread(task["file_path"], self.proxy_dir)
         self.active_proxy_threads.add(thread)
         
-        # Connect signals
-        if on_progress_callback:
-            thread.progress_updated.connect(on_progress_callback)
-        if on_finish_callback:
-            thread.proxy_finished.connect(on_finish_callback)
-        if on_fail_callback:
-            thread.proxy_failed.connect(on_fail_callback)
+        if task["on_progress_callback"]:
+            thread.progress_updated.connect(task["on_progress_callback"])
+        if task["on_finish_callback"]:
+            thread.proxy_finished.connect(task["on_finish_callback"])
+        if task["on_fail_callback"]:
+            thread.proxy_failed.connect(task["on_fail_callback"])
             
-        # Cleanup when done
-        thread.finished.connect(lambda t=thread: self.active_proxy_threads.discard(t) if t in self.active_proxy_threads else None)
+        thread.finished.connect(lambda t=thread: self._on_proxy_thread_finished(t))
         thread.finished.connect(thread.deleteLater)
         
         thread.start()
 
+    def _on_proxy_thread_finished(self, thread):
+        """Releases the thread from the resource pool and triggers the next item in the queue."""
+        if thread in self.active_proxy_threads:
+            self.active_proxy_threads.discard(thread)
+        self._process_next_proxy()
+
     def request_waveform(self, file_path):
-        """Asynchronously requests waveform envelope data for an audio/video file."""
         if not os.path.exists(file_path):
             return
             
         thread = WaveformGeneratorThread(file_path, app_config.waveform_cache_path)
-        self.active_proxy_threads.add(thread)
+        # Borrow the proxy resource cap pool to manage memory here too
+        self.active_proxy_threads.add(thread) 
         thread.waveform_ready.connect(self._on_waveform_ready)
-        thread.finished.connect(lambda t=thread: self.active_proxy_threads.discard(t) if t in self.active_proxy_threads else None)
+        thread.finished.connect(lambda t=thread: self._on_proxy_thread_finished(t))
         thread.finished.connect(thread.deleteLater)
         thread.start()
 
@@ -313,5 +328,4 @@ class MediaManager:
         from core.signal_hub import global_signals
         global_signals.waveform_ready.emit(file_path, data)
 
-# Global singleton
 media_manager = MediaManager()

@@ -15,18 +15,37 @@ from core.app_config import app_config
 from core.signal_hub import global_signals
 
 class MediaLoaderThread(QThread):
-    """Background Thread: Processes heavy files (OpenCV Video extraction) without freezing the UI!"""
+    """Background Thread: Processes heavy files (Copying and Video extraction) without freezing the UI!"""
     item_processed = Signal(dict)
+    finished_all = Signal()
     
-    def __init__(self, paths):
+    def __init__(self, paths, copy_enabled=False, dest_dir=None):
         super().__init__()
         self.paths = paths
+        self.copy_enabled = copy_enabled
+        self.dest_dir = dest_dir
         
     def run(self):
         for path in self.paths:
-            info = media_manager.process_file(path)
+            final_path = path
+            
+            # File copying is now safely offloaded to this background thread
+            if self.copy_enabled and self.dest_dir:
+                filename = os.path.basename(path)
+                dest_path = os.path.join(self.dest_dir, filename).replace('\\', '/')
+                
+                if not os.path.exists(dest_path) or os.path.abspath(path) != os.path.abspath(dest_path):
+                    try:
+                        shutil.copy2(path, dest_path)
+                        final_path = dest_path
+                    except Exception as e:
+                        print(f"Failed to copy media file {path}: {e}")
+            
+            info = media_manager.process_file(final_path)
             if info:
                 self.item_processed.emit(info)
+                
+        self.finished_all.emit()
 
 class DraggableCard(QFrame):
     add_requested = Signal(dict)
@@ -39,7 +58,7 @@ class DraggableCard(QFrame):
         self.subtype = subtype
         self.file_path = file_path
         self.thumbnail_path = thumbnail
-        self.proxy_path = "" # Will be filled if proxy generation succeeds
+        self.proxy_path = "" 
         
         self.setFixedSize(145, 120) 
         self.setCursor(Qt.PointingHandCursor)
@@ -74,7 +93,7 @@ class DraggableCard(QFrame):
             
         # 1a. Progress Bar for Proxy Generation (Hidden by default)
         self.progress_bar = QProgressBar(self.thumb_lbl)
-        self.progress_bar.setGeometry(10, 60, 115, 6) # Small sleek bar at bottom of thumbnail
+        self.progress_bar.setGeometry(10, 60, 115, 6) 
         self.progress_bar.setTextVisible(False)
         self.progress_bar.setRange(0, 100)
         self.progress_bar.setValue(0)
@@ -226,7 +245,6 @@ class ProjectSettingsDialog(QDialog):
         content_layout.setContentsMargins(20, 20, 20, 20)
         content_layout.setSpacing(15)
 
-        # Resolution Dropdown
         res_layout = QHBoxLayout()
         res_layout.addWidget(QLabel("Resolution:"))
         self.cb_res = QComboBox()
@@ -247,7 +265,6 @@ class ProjectSettingsDialog(QDialog):
         res_layout.addWidget(self.cb_res)
         content_layout.addLayout(res_layout)
 
-        # FPS Dropdown
         fps_layout = QHBoxLayout()
         fps_layout.addWidget(QLabel("Frame Rate:"))
         self.cb_fps = QComboBox()
@@ -262,14 +279,12 @@ class ProjectSettingsDialog(QDialog):
         fps_layout.addWidget(self.cb_fps)
         content_layout.addLayout(fps_layout)
 
-        # File Handling Toggle
         self.chk_copy_media = QCheckBox("Copy imported media to project directory")
         self.chk_copy_media.setChecked(app_config.get_setting("copy_media_to_project", False))
         content_layout.addWidget(self.chk_copy_media)
 
         content_layout.addStretch()
 
-        # Action Buttons
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         btn_cancel = QPushButton("Cancel")
@@ -304,7 +319,7 @@ class WorkspacePanel(QFrame):
         self.media_row = 0
         self.media_col = 0
         self.active_threads = set() 
-        self.media_cards = {} # Cache to map file paths to DraggableCard UI widgets
+        self.media_cards = {} 
         
         self.setStyleSheet("""
             QFrame#Panel {
@@ -385,8 +400,6 @@ class WorkspacePanel(QFrame):
         self.stack.addWidget(self._create_preset_tab("Transitions", "mdi6.swap-horizontal", ["Cross Dissolve", "Dip to Black", "Wipe", "Zoom", "Slide", "Glitch"]))
 
         self.switch_tab(0)
-        
-        # Listen for when a project loads so we can update the UI labels
         global_signals.project_loaded.connect(self._on_project_loaded)
 
     def switch_tab(self, index):
@@ -463,11 +476,9 @@ class WorkspacePanel(QFrame):
         return widget
 
     def _on_project_loaded(self, project_data):
-        """Updates the labels in the Workspace tab based on the active project."""
         self._update_settings_labels(project_data)
 
     def _open_project_settings(self):
-        """Opens the dialog to edit the active project's settings."""
         if not project_manager.current_project:
             return
             
@@ -481,24 +492,18 @@ class WorkspacePanel(QFrame):
         
         if dialog.exec():
             now_copy_enabled = dialog.chk_copy_media.isChecked()
-            
-            # Apply Settings back to App Config
             app_config.set_setting("copy_media_to_project", now_copy_enabled)
             
-            # Update the project object
             project_manager.current_project.resolution = dialog.get_resolution()
             project_manager.current_project.fps = dialog.get_fps()
             
-            # Immediately save and update the UI
             self._update_settings_labels(project_manager.current_project)
             project_manager.save_project()
             
-            # Retroactively copy media into project folder if the user just enabled the option mid-edit
             if now_copy_enabled and not was_copy_enabled:
                 self._retroactively_copy_media()
 
     def _retroactively_copy_media(self):
-        """Copies all existing media in the bin to the project folder if the setting was turned on late."""
         proj_dir = os.path.dirname(project_manager.project_path) if project_manager.project_path else None
         if not proj_dir: return
 
@@ -529,10 +534,8 @@ class WorkspacePanel(QFrame):
                 updated_paths.append(path)
 
         if changed:
-            # 1. Update the overall media bin in project data
             project_manager.current_project.media_bin = updated_paths
             
-            # 2. Update file_path references on clips already placed in the timeline
             for track in project_manager.current_project.tracks:
                 for clip in track.clips:
                     if clip.file_path:
@@ -541,21 +544,14 @@ class WorkspacePanel(QFrame):
                             clip.file_path = path_mapping[c_abs]
 
             project_manager.save_project()
-            
-            # 3. Reload media UI safely with new paths
             self.load_media_bin_from_paths(updated_paths)
-            
-            # 4. Trigger UI reload of the timeline to ensure safe sync
             global_signals.project_loaded.emit(project_manager.current_project)
 
     def _update_settings_labels(self, project):
-        if not project:
-            return
-            
+        if not project: return
         res = project.resolution
         fps = project.fps
         
-        # Format resolution for UI
         res_str = f"{res[0]}x{res[1]}"
         if res == (3840, 2160): res_str += " (4K)"
         elif res == (1920, 1080): res_str += " (HD)"
@@ -563,8 +559,6 @@ class WorkspacePanel(QFrame):
         elif res == (1080, 1080): res_str += " (Square)"
             
         self.lbl_res_value.setText(res_str)
-        
-        # Clean formatting for floats (e.g. 30.0 -> 30, 23.976 -> 23.976)
         fps_str = str(fps).rstrip('0').rstrip('.') if fps % 1 == 0 else str(fps)
         self.lbl_fps_value.setText(f"{fps_str} fps")
 
@@ -635,7 +629,8 @@ class WorkspacePanel(QFrame):
 
     def load_media_bin_from_paths(self, paths):
         self.clear_media_bin()
-        self._process_media_files_async(paths)
+        # Ensure we don't duplicate copying operations on startup
+        self._process_media_files_async(paths, False, None)
 
     def _import_media_files(self):
         file_paths, _ = QFileDialog.getOpenFileNames(
@@ -661,11 +656,7 @@ class WorkspacePanel(QFrame):
                 self._handle_media_import(new_paths)
                 
     def _handle_media_import(self, file_paths):
-        """Processes imports, automatically copying files into the project folder if the setting is enabled."""
-        new_paths = []
         copy_enabled = app_config.get_setting("copy_media_to_project", False)
-        
-        # Derive project folder path directly from where the current hive file is saved
         proj_dir = os.path.dirname(project_manager.project_path) if project_manager.project_path else None
         
         media_dir = None
@@ -673,55 +664,44 @@ class WorkspacePanel(QFrame):
             media_dir = os.path.join(proj_dir, "media")
             os.makedirs(media_dir, exist_ok=True)
             
-        for path in file_paths:
-            path = path.replace('\\', '/')
-            final_path = path
-            
-            # Copy logic
-            if copy_enabled and media_dir:
-                filename = os.path.basename(path)
-                dest_path = os.path.join(media_dir, filename).replace('\\', '/')
-                
-                # Check if it doesn't already exist in the destination or if paths are different
-                if not os.path.exists(dest_path) or os.path.abspath(path) != os.path.abspath(dest_path):
-                    try:
-                        shutil.copy2(path, dest_path)
-                        final_path = dest_path
-                    except Exception as e:
-                        print(f"Failed to copy media file {path}: {e}")
-                        
-            if final_path not in project_manager.current_project.media_bin:
-                project_manager.current_project.media_bin.append(final_path)
-                new_paths.append(final_path)
-                
-        if new_paths:
-            self._process_media_files_async(new_paths)
-            project_manager.save_project()
+        self._process_media_files_async(file_paths, copy_enabled, media_dir)
 
-    def _process_media_files_async(self, file_paths):
+    def _process_media_files_async(self, file_paths, copy_enabled=False, dest_dir=None):
         if not file_paths: return
         
-        thread = MediaLoaderThread(file_paths)
+        thread = MediaLoaderThread(file_paths, copy_enabled, dest_dir)
         self.active_threads.add(thread)
         
         thread.item_processed.connect(self._add_media_card_to_grid)
+        thread.finished_all.connect(self._on_import_batch_finished)
+        
         thread.finished.connect(lambda t=thread: self.active_threads.discard(t) if t in getattr(self, 'active_threads', set()) else None)
         thread.finished.connect(thread.deleteLater)
         thread.start()
 
+    def _on_import_batch_finished(self):
+        # Save project just once at the end of a heavy import session
+        project_manager.save_project()
+
     def _add_media_card_to_grid(self, media_info):
+        final_path = media_info["path"]
+        
+        # Add to logical project bin
+        if final_path not in project_manager.current_project.media_bin:
+            project_manager.current_project.media_bin.append(final_path)
+
         card = DraggableCard(
             title=media_info["name"],
             icon_name=media_info["icon"],
             item_type="media",
             subtype=media_info["type"],
-            file_path=media_info["path"],
+            file_path=final_path,
             thumbnail=media_info["thumbnail"]
         )
         card.add_requested.connect(self.add_item_to_timeline.emit)
         card.preview_requested.connect(self.preview_requested.emit)
         
-        self.media_cards[media_info["path"]] = card
+        self.media_cards[final_path] = card
 
         self.media_grid.addWidget(card, self.media_row, self.media_col)
         self.media_col += 1
@@ -729,10 +709,10 @@ class WorkspacePanel(QFrame):
             self.media_col = 0
             self.media_row += 1
 
-        # Triggers proxy generation for videos immediately after adding to UI
+        # Generates proxies via queue to prevent System lock-up
         if media_info["type"] == "video" and app_config.get_setting("auto_proxies", True):
             media_manager.start_proxy_generation(
-                media_info["path"],
+                final_path,
                 on_progress_callback=self._handle_proxy_progress,
                 on_finish_callback=self._handle_proxy_finished,
                 on_fail_callback=self._handle_proxy_failed 
