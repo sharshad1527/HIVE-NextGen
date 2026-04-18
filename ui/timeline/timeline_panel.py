@@ -29,12 +29,13 @@ class ThumbSignals(QObject):
 
 class FrameFetchWorker(QRunnable):
     """Background worker that seeks to a specific time in a video and extracts a frame."""
-    def __init__(self, file_path, time_ms, height, cache_key):
+    def __init__(self, file_path, time_ms, height, cache_key, disk_path):
         super().__init__()
         self.file_path = file_path
         self.time_ms = time_ms
         self.height = height
         self.cache_key = cache_key
+        self.disk_path = disk_path
         self.signals = ThumbSignals()
 
     def run(self):
@@ -56,11 +57,17 @@ class FrameFetchWorker(QRunnable):
                 new_w = int(w * (self.height / h)) if h > 0 else int(self.height * 1.777)
                 
                 if new_w > 0 and self.height > 0:
-                    frame = cv2.resize(frame, (new_w, self.height))
-                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                    h, w, ch = frame.shape
+                    frame_resized = cv2.resize(frame, (new_w, self.height))
                     
-                    qimg = QImage(frame.data, w, h, ch * w, QImage.Format_RGB888)
+                    # 1. Save to persistent project disk cache (BGR format natively supported by cv2)
+                    cv2.imwrite(self.disk_path, frame_resized)
+                    
+                    # 2. Convert to RGB for PySide6 UI Rendering
+                    frame_rgb = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+                    h_r, w_r, ch_r = frame_rgb.shape
+                    
+                    # Use .copy() to strictly prevent memory corruption when numpy array is garbage collected
+                    qimg = QImage(frame_rgb.data, w_r, h_r, ch_r * w_r, QImage.Format_RGB888).copy()
                     px = QPixmap.fromImage(qimg)
                     self.signals.loaded.emit(self.cache_key, px)
                     
@@ -149,6 +156,20 @@ class TracksCanvas(QWidget):
 
         global_signals.waveform_ready.connect(self._on_waveform_ready)
 
+    def get_project_cache_dir(self):
+        """Returns a local /cache folder inside the current project to store thumbnails."""
+        if hasattr(project_manager, 'current_project') and project_manager.current_project:
+            try:
+                proj_name = project_manager.current_project.name
+                proj_dir = os.path.join(str(app_config.default_project_path), proj_name)
+                cache_dir = os.path.join(proj_dir, "cache")
+                os.makedirs(cache_dir, exist_ok=True)
+                return cache_dir
+            except Exception:
+                pass
+        # Fallback
+        return str(app_config.thumbnail_cache_path)
+
     def _on_waveform_ready(self, file_path, waveform):
         """Ingests processed audio arrays mapped by backend."""
         for item in self.items:
@@ -163,27 +184,40 @@ class TracksCanvas(QWidget):
         self.update()
 
     def _get_dynamic_thumbnail(self, item, time_ms, target_height):
-        """Fetches an exact video frame, or spawns a background thread if not cached."""
+        """Fetches an exact video frame, prioritizing Memory -> Disk -> OpenCV Threads."""
         file_path = item.get("file_path")
         if not file_path or not os.path.exists(file_path):
             return None
 
         file_hash = hashlib.md5(file_path.encode()).hexdigest()
-        # Quantize cache requests to the nearest second to keep performance blazing fast across zoom levels
-        time_ms_quantized = round(time_ms / 1000.0) * 1000
+        
+        # Quantize to 3 seconds (3000ms) for huge performance gains
+        time_ms_quantized = round(time_ms / 3000.0) * 3000
         cache_key = f"{file_hash}_{target_height}_{time_ms_quantized}"
 
+        # 1. RAM Cache (Instant Delivery)
         if cache_key in self.pixmap_cache:
             return self.pixmap_cache[cache_key]
 
+        # 2. Disk Cache (Fast Delivery - avoids re-decoding across reboots)
+        disk_cache_path = os.path.join(self.get_project_cache_dir(), f"{cache_key}.jpg")
+        if os.path.exists(disk_cache_path):
+            px = self._get_pixmap(disk_cache_path, target_height)
+            if px:
+                self.pixmap_cache[cache_key] = px
+                return px
+
+        # 3. Generation via OpenCV (Heavy - Pushed to Background Thread)
         if cache_key not in self.pending_thumbs:
             self.pending_thumbs.add(cache_key)
-            worker = FrameFetchWorker(file_path, time_ms_quantized, target_height, cache_key)
+            worker = FrameFetchWorker(file_path, time_ms_quantized, target_height, cache_key, disk_cache_path)
             worker.signals.loaded.connect(self._on_dynamic_thumb_loaded)
             self.thread_pool.start(worker)
 
         # Immediate Fallback to the main generic thumbnail while loading to prevent blinking
-        fallback_path = os.path.join(str(app_config.thumbnail_cache_path), f"{file_hash}.jpg")
+        fallback_path = os.path.join(self.get_project_cache_dir(), f"{file_hash}.jpg")
+        if not os.path.exists(fallback_path):
+            fallback_path = os.path.join(str(app_config.thumbnail_cache_path), f"{file_hash}.jpg")
         return self._get_pixmap(fallback_path, target_height)
 
     def _get_pixmap(self, path, height):
@@ -794,18 +828,39 @@ class TracksCanvas(QWidget):
         self.update()
 
     def delete_selected_item(self):
-        if self.selected_ids:
-            to_delete = set()
-            for i in self.items:
-                if i["id"] in self.selected_ids or i.get("parent_id") in self.selected_ids:
-                    if not self.is_track_locked(i["track"]):
+        if not self.selected_ids:
+            return
+
+        changed = False
+        to_delete = set()
+        
+        for i in self.items:
+            if i["id"] in self.selected_ids or i.get("parent_id") in self.selected_ids:
+                if not self.is_track_locked(i["track"]):
+                    # Intelligently pop sub-properties if the user had them selected
+                    if self.selected_item_type == "transition_in":
+                        i.pop("transition_in", None)
+                        i.pop("transition", None) # Fallback legacy key
+                        i.pop("transition_in_duration", None)
+                        changed = True
+                    elif self.selected_item_type == "transition_out":
+                        i.pop("transition_out", None)
+                        i.pop("transition_out_duration", None)
+                        changed = True
+                    elif self.selected_item_type == "clip_effect":
+                        i.pop("applied_effects", None)
+                        changed = True
+                    else:
                         to_delete.add(i["id"])
-                    
+
+        if to_delete:
             self.items = [i for i in self.items if i["id"] not in to_delete]
             self.selected_ids.difference_update(to_delete)
             if not self.selected_ids:
                 self.selected_item_type = ""
-                
+            changed = True
+            
+        if changed:
             self.save_state()
             self._cleanup_empty_tracks()
             self._apply_magnetic_v1()
@@ -984,6 +1039,8 @@ class TracksCanvas(QWidget):
                         rect = QRect(int(item["x"] * z), int(draw_y) + 4, int(item["w"] * z), th - 8)
                         
                         sub_item_clicked = None
+                        
+                        # Priority selection - Because it renders on top, we intercept FX clicks first!
                         if item.get("applied_effects"):
                             fx_rect = QRect(rect.right() - 22, rect.top() + 4, 18, 16)
                             if fx_rect.contains(physical_x, y):
@@ -1481,6 +1538,9 @@ class TracksCanvas(QWidget):
                     painter.setPen(QPen(border_color, 1))
                     painter.drawPath(c_path)
 
+        # -------------------------------------------------------------
+        # PASS 1: Base Graphics (Rectangles, Thumbnails, Waveforms)
+        # -------------------------------------------------------------
         for item in self.items:
             if self.is_track_hidden(item["track"]): continue
             
@@ -1598,28 +1658,6 @@ class TracksCanvas(QWidget):
                         painter.fillRect(rect, overlay_color)
                         painter.restore()
                 
-                painter.setPen(QColor("#d1d1d1"))
-                
-                prefix = ""
-                if item.get("freeze"): prefix += "[F] "
-                if item.get("reverse"): prefix += "[Rev] "
-                if item.get("mirror"): prefix += "[M] "
-                if item.get("rotate"): prefix += "[Rot] "
-                if item.get("crop"): prefix += "[C] "
-                
-                painter.setFont(QFont("Arial", 8, QFont.Bold))
-                painter.drawText(rect.adjusted(5, 5, -5, -5), Qt.AlignLeft | Qt.AlignTop, prefix + item["text"])
-
-                if item.get("applied_effects"):
-                    fx_rect = QRect(rect.right() - 22, rect.top() + 4, 18, 16)
-                    fill_color = QColor(155, 89, 182, 220) if is_selected and self.selected_item_type == "clip_effect" else QColor(155, 89, 182, 180)
-                    painter.fillRect(fx_rect, fill_color) 
-                    painter.setPen(QPen(QColor("#e0b0ff"), 1 if is_selected and self.selected_item_type == "clip_effect" else 0))
-                    painter.drawRect(fx_rect)
-                    painter.setPen(QColor("#ffffff"))
-                    painter.setFont(QFont("Arial", 7, QFont.Bold))
-                    painter.drawText(fx_rect, Qt.AlignCenter, "FX")
-                
             elif item["type"] == "audio":
                 if is_selected:
                     painter.fillPath(path, QColor(230, 107, 44, 25))
@@ -1689,7 +1727,10 @@ class TracksCanvas(QWidget):
                         safe_h = min(h, max_wave_h) 
                         painter.drawLine(hx, int(base_y - safe_h/2), hx, int(base_y + safe_h/2))
 
-        # PASS 2: Draw Transitions on Top
+        # -------------------------------------------------------------
+        # PASS 2: Overlay Elements (Transitions, Text, FX Badges)
+        # Guarantees FX Button and Names are readable on top of everything!
+        # -------------------------------------------------------------
         for item in self.items:
             if self.is_track_hidden(item["track"]): continue
             if item["type"] not in ["video", "image"]: continue
@@ -1730,6 +1771,29 @@ class TracksCanvas(QWidget):
                 painter.setPen(QColor("#ffffff"))
                 painter.setFont(QFont("Arial", 8, QFont.Bold))
                 painter.drawText(t_rect, Qt.AlignCenter, "T")
+
+            # Draw Readability Text
+            painter.setPen(QColor("#d1d1d1"))
+            prefix = ""
+            if item.get("freeze"): prefix += "[F] "
+            if item.get("reverse"): prefix += "[Rev] "
+            if item.get("mirror"): prefix += "[M] "
+            if item.get("rotate"): prefix += "[Rot] "
+            if item.get("crop"): prefix += "[C] "
+            
+            painter.setFont(QFont("Arial", 8, QFont.Bold))
+            painter.drawText(rect.adjusted(5, 5, -5, -5), Qt.AlignLeft | Qt.AlignTop, prefix + item["text"])
+
+            # Render the FX box LAST so it remains clickable on top of transitions
+            if item.get("applied_effects"):
+                fx_rect = QRect(rect.right() - 22, rect.top() + 4, 18, 16)
+                fill_color = QColor(155, 89, 182, 220) if is_selected and self.selected_item_type == "clip_effect" else QColor(155, 89, 182, 180)
+                painter.fillRect(fx_rect, fill_color) 
+                painter.setPen(QPen(QColor("#e0b0ff"), 1 if is_selected and self.selected_item_type == "clip_effect" else 0))
+                painter.drawRect(fx_rect)
+                painter.setPen(QColor("#ffffff"))
+                painter.setFont(QFont("Arial", 7, QFont.Bold))
+                painter.drawText(fx_rect, Qt.AlignCenter, "FX")
 
         if self.marquee_start and self.marquee_current:
             rect = QRect(self.marquee_start, self.marquee_current).normalized()

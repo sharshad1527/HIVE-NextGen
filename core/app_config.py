@@ -144,29 +144,53 @@ class AppConfig:
 
     # --- Cache Management ---
 
-    def calculate_cache_size(self):
-        """Scans the proxy and thumbnail folders and returns a human-readable size."""
+    def get_directory_size(self, path):
+        """Recursively calculates the total size of a directory in bytes."""
         total_size = 0
-        for cache_dir in [self.proxy_cache_path, self.thumbnail_cache_path, self.waveform_cache_path]:
-            if cache_dir.exists():
-                for dirpath, _, filenames in os.walk(cache_dir):
-                    for f in filenames:
-                        fp = os.path.join(dirpath, f)
-                        if not os.path.islink(fp):
+        if os.path.exists(path):
+            for dirpath, _, filenames in os.walk(path):
+                for f in filenames:
+                    fp = os.path.join(dirpath, f)
+                    if not os.path.islink(fp):
+                        try:
                             total_size += os.path.getsize(fp)
-        
-        if total_size == 0:
+                        except OSError:
+                            pass
+        return total_size
+
+    def format_size(self, size_bytes):
+        """Converts raw bytes to human readable format."""
+        if size_bytes == 0:
             return "0 MB"
-        elif total_size < 1024 * 1024:
-            return f"{total_size / 1024:.2f} KB"
-        elif total_size < 1024 * 1024 * 1024:
-            return f"{total_size / (1024 * 1024):.2f} MB"
+        elif size_bytes < 1024 * 1024:
+            return f"{size_bytes / 1024:.2f} KB"
+        elif size_bytes < 1024 * 1024 * 1024:
+            return f"{size_bytes / (1024 * 1024):.2f} MB"
         else:
-            return f"{total_size / (1024 * 1024 * 1024):.2f} GB"
+            return f"{size_bytes / (1024 * 1024 * 1024):.2f} GB"
+
+    def calculate_cache_size(self):
+        """Scans the global proxy/thumbnail folders AND project-local caches and returns a human-readable size."""
+        total_size = 0
+        
+        # 1. Global caches
+        for cache_dir in [self.proxy_cache_path, self.thumbnail_cache_path, self.waveform_cache_path]:
+            total_size += self.get_directory_size(cache_dir)
+            
+        # 2. Project-local caches
+        if self.default_project_path.exists():
+            for item in self.default_project_path.iterdir():
+                if item.is_dir() and item.name != ".bin":
+                    proj_cache = item / "cache"
+                    total_size += self.get_directory_size(proj_cache)
+        
+        return self.format_size(total_size)
 
     def clear_cache(self):
-        """Deletes all generated proxy and thumbnail files."""
+        """Deletes all generated proxy and thumbnail files globally and locally."""
         freed_space = self.calculate_cache_size()
+        
+        # Clear global
         for cache_dir in [self.proxy_cache_path, self.thumbnail_cache_path, self.waveform_cache_path]:
             if cache_dir.exists():
                 for filename in os.listdir(cache_dir):
@@ -178,6 +202,18 @@ class AppConfig:
                             shutil.rmtree(file_path)
                     except Exception as e:
                         print(f"Failed to delete {file_path}. Reason: {e}")
+                        
+        # Clear project-local caches
+        if self.default_project_path.exists():
+            for item in self.default_project_path.iterdir():
+                if item.is_dir() and item.name != ".bin":
+                    proj_cache = item / "cache"
+                    if proj_cache.exists():
+                        try:
+                            shutil.rmtree(proj_cache)
+                        except Exception as e:
+                            print(f"Failed to delete project cache {proj_cache}. Reason: {e}")
+
         return freed_space
 
 # Global instance
