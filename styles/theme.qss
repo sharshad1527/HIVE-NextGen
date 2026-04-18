@@ -1,0 +1,114 @@
+/* styles/theme.qss */
+/* Base Colors: 
+   bg: metallic radial gradient
+   panel: #151515
+   panelBorder: #262626
+   accent: #e66b2c
+*/
+
+QMainWindow, QDialog {
+    /* A dark grayish metallic radial gradient: grayish at center, dark at corners */
+    background: qradialgradient(cx: 0.5, cy: 0.5, radius: 0.8, fx: 0.5, fy: 0.5, 
+                                stop: 0 #4a4a4a, stop: 0.4 #1e1e1e, stop: 1 #050505);
+}
+
+QWidget {
+    color: #d1d1d1;
+    font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    font-size: 10pt;
+}
+
+/* Custom Panel Container - Gives the sleek rounded box look */
+QFrame#Panel {
+    background-color: #151515;
+    border: 1px solid #262626;
+    border-radius: 10px;
+}
+
+/* --- TITLE BAR --- */
+QWidget#TitleBar {
+    /* Make this transparent so the window gradient shows through */
+    background-color: transparent; 
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+QLabel#TitleBarBrand {
+    color: #d1d1d1;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 2px;
+}
+
+QPushButton#TitleBarBtn {
+    background-color: transparent;
+    border: none;
+    color: #808080;
+    border-radius: 4px;
+}
+
+QPushButton#TitleBarBtn:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+    color: #ffffff;
+}
+
+QPushButton#TitleBarCloseBtn {
+    background-color: transparent;
+    border: none;
+    color: #808080;
+    border-radius: 4px;
+}
+
+QPushButton#TitleBarCloseBtn:hover {
+    background-color: #e81123;
+    color: #ffffff;
+}
+
+/* --- SIDEBAR --- */
+QFrame#Sidebar {
+    background-color: #151515;
+    border: 1px solid #262626;
+    border-radius: 10px;
+}
+
+QLabel#SidebarLogo {
+    color: #e66b2c;
+    font-size: 24px;
+    font-weight: bold;
+    font-style: italic;
+}
+
+QPushButton#SidebarBtn {
+    background-color: transparent;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    color: #808080;
+    padding: 8px;
+}
+
+QPushButton#SidebarBtn:hover {
+    background-color: rgba(255, 255, 255, 0.05);
+    color: #ffffff;
+}
+
+/* Active state simulation */
+QPushButton#SidebarBtn:checked {
+    background-color: rgba(230, 107, 44, 0.1);
+    border: 1px solid rgba(230, 107, 44, 0.3);
+    color: #e66b2c;
+}
+
+/* --- SPLITTERS --- */
+QSplitter::handle {
+    background-color: transparent;
+    margin: 2px;
+}
+QSplitter::handle:hover {
+    background-color: rgba(230, 107, 44, 0.5); /* Subtle orange on hover */
+}
+
+/* Placeholder Labels for empty panels */
+QLabel#PlaceholderText {
+    color: #404040;
+    font-size: 14px;
+    font-weight: bold;
+}
