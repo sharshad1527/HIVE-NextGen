@@ -7,7 +7,7 @@ import os
 import hashlib
 from PySide6.QtWidgets import (QFrame, QVBoxLayout, QHBoxLayout, QPushButton, 
                                QLabel, QWidget, QScrollArea, QSlider)
-from PySide6.QtCore import Qt, QRect, QPoint, Signal, QTimer, QRunnable, QThreadPool, QObject
+from PySide6.QtCore import Qt, QRect, QPoint, Signal, QTimer, QRunnable, QThreadPool, QObject, QCoreApplication
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath, QCursor, QPixmap, QImage
 
 from core.signal_hub import global_signals
@@ -25,7 +25,7 @@ except ImportError:
 
 
 class ThumbSignals(QObject):
-    loaded = Signal(str, QPixmap)
+    loaded = Signal(str, QImage) # FIX: Use QImage safely across threads
 
 class FrameFetchWorker(QRunnable):
     """Background worker that seeks to a specific time in a video and extracts a frame."""
@@ -41,14 +41,22 @@ class FrameFetchWorker(QRunnable):
     def run(self):
         if not CV2_AVAILABLE:
             return
+            
+        qimg = QImage() # FIX: Initialize an empty QImage
         try:
             import cv2
             cap = cv2.VideoCapture(self.file_path)
             if not cap.isOpened():
                 return
                 
-            # Seek to specific frame time
-            cap.set(cv2.CAP_PROP_POS_MSEC, self.time_ms)
+            # Robust seeking: POS_MSEC is broken on many long MP4s. Use POS_FRAMES.
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps and fps > 0:
+                frame_target = int((self.time_ms / 1000.0) * fps)
+                cap.set(cv2.CAP_PROP_POS_FRAMES, frame_target)
+            else:
+                cap.set(cv2.CAP_PROP_POS_MSEC, self.time_ms)
+            
             ret, frame = cap.read()
             cap.release()
             
@@ -59,7 +67,7 @@ class FrameFetchWorker(QRunnable):
                 if new_w > 0 and self.height > 0:
                     frame_resized = cv2.resize(frame, (new_w, self.height))
                     
-                    # 1. Save to persistent project disk cache (BGR format natively supported by cv2)
+                    # 1. Save to persistent project disk cache
                     cv2.imwrite(self.disk_path, frame_resized)
                     
                     # 2. Convert to RGB for PySide6 UI Rendering
@@ -68,11 +76,15 @@ class FrameFetchWorker(QRunnable):
                     
                     # Use .copy() to strictly prevent memory corruption when numpy array is garbage collected
                     qimg = QImage(frame_rgb.data, w_r, h_r, ch_r * w_r, QImage.Format_RGB888).copy()
-                    px = QPixmap.fromImage(qimg)
-                    self.signals.loaded.emit(self.cache_key, px)
                     
         except Exception as e:
             print(f"Dynamic thumbnail error: {e}")
+        finally:
+            # FIX: Safely emit the signal. If the app is closing, ignore the RuntimeError.
+            try:
+                self.signals.loaded.emit(self.cache_key, qimg)
+            except RuntimeError:
+                pass
 
 
 class TracksCanvas(QWidget):
@@ -116,7 +128,13 @@ class TracksCanvas(QWidget):
         
         self.pixmap_cache = {} 
         self.pending_thumbs = set()
+        
+        # FIX: App Teardown Protection
         self.thread_pool = QThreadPool.globalInstance()
+        self.thread_pool.setMaxThreadCount(min(4, self.thread_pool.maxThreadCount()))
+        app = QCoreApplication.instance()
+        if app:
+            app.aboutToQuit.connect(self._cleanup_threads)
         
         self._click_physical_pos = None
         self._click_logical_x = 0
@@ -156,6 +174,10 @@ class TracksCanvas(QWidget):
 
         global_signals.waveform_ready.connect(self._on_waveform_ready)
 
+    def _cleanup_threads(self):
+        """Clears pending thumbnail loads to prevent crashes on exit."""
+        self.thread_pool.clear()
+
     def get_project_cache_dir(self):
         """Returns a local /cache folder inside the current project to store thumbnails."""
         if hasattr(project_manager, 'current_project') and project_manager.current_project:
@@ -177,9 +199,12 @@ class TracksCanvas(QWidget):
                 item["waveform"] = waveform
         self.update()
 
-    def _on_dynamic_thumb_loaded(self, cache_key, pixmap):
+    def _on_dynamic_thumb_loaded(self, cache_key, qimg):
         """Callback when background thread finishes decoding a video frame."""
-        self.pixmap_cache[cache_key] = pixmap
+        # FIX: Receive QImage and convert to QPixmap safely on the main thread
+        if not qimg.isNull():
+            self.pixmap_cache[cache_key] = QPixmap.fromImage(qimg)
+        
         self.pending_thumbs.discard(cache_key)
         self.update()
 
@@ -197,7 +222,8 @@ class TracksCanvas(QWidget):
 
         # 1. RAM Cache (Instant Delivery)
         if cache_key in self.pixmap_cache:
-            return self.pixmap_cache[cache_key]
+            px = self.pixmap_cache[cache_key]
+            return px if not px.isNull() else None
 
         # 2. Disk Cache (Fast Delivery - avoids re-decoding across reboots)
         disk_cache_path = os.path.join(self.get_project_cache_dir(), f"{cache_key}.jpg")
@@ -209,10 +235,11 @@ class TracksCanvas(QWidget):
 
         # 3. Generation via OpenCV (Heavy - Pushed to Background Thread)
         if cache_key not in self.pending_thumbs:
-            self.pending_thumbs.add(cache_key)
-            worker = FrameFetchWorker(file_path, time_ms_quantized, target_height, cache_key, disk_cache_path)
-            worker.signals.loaded.connect(self._on_dynamic_thumb_loaded)
-            self.thread_pool.start(worker)
+            if len(self.pending_thumbs) < 30:  # Limit queue depth to prevent extreme lag on fast scrubbing
+                self.pending_thumbs.add(cache_key)
+                worker = FrameFetchWorker(file_path, time_ms_quantized, target_height, cache_key, disk_cache_path)
+                worker.signals.loaded.connect(self._on_dynamic_thumb_loaded)
+                self.thread_pool.start(worker)
 
         # Immediate Fallback to the main generic thumbnail while loading to prevent blinking
         fallback_path = os.path.join(self.get_project_cache_dir(), f"{file_hash}.jpg")
@@ -263,7 +290,7 @@ class TracksCanvas(QWidget):
                         "file_path": clip.file_path,
                         "x": ui_x,
                         "w": ui_w,
-                        "max_w": float('inf'),
+                        "max_w": clip.applied_effects.get("max_w", float('inf')) if isinstance(clip.applied_effects, dict) else float('inf'),
                         "source_in": clip.applied_effects.get("source_in", 0) if isinstance(clip.applied_effects, dict) else 0
                     }
                     
@@ -304,7 +331,7 @@ class TracksCanvas(QWidget):
                 # Clean out UI-only objects (like inf floats/waveforms) that crash MsgPack saving
                 metadata = {}
                 for k, v in item.items():
-                    if k not in ["id", "track", "type", "text", "file_path", "x", "w", "max_w", "visual_y", "waveform"]:
+                    if k not in ["id", "track", "type", "text", "file_path", "x", "w", "visual_y", "waveform"]:
                         metadata[k] = v
                 
                 actual_file_path = item.get("file_path", item.get("text", ""))
@@ -545,13 +572,43 @@ class TracksCanvas(QWidget):
             display_text = os.path.basename(file_path) if file_path else (title if title else "New Item")
 
             item_w = 1000
-            if drop_type == "caption":
+            max_w = float('inf')
+            
+            if data.get("duration"):
+                item_w = int(float(data.get("duration")) * 100)
+                if subtype in ["video", "audio"]: max_w = item_w
+            elif drop_type == "caption":
                 item_w = 400
             elif drop_type == "effect":
                 item_w = 1500
             elif subtype == "image":
                 item_w = int(app_config.get_setting("default_image_duration", 5.0) * 100)
-
+            elif subtype in ["video", "audio"] and file_path:
+                duration_sec = 0
+                # 1. Try native wave module for flawless .wav parsing
+                if file_path.lower().endswith('.wav'):
+                    try:
+                        import wave
+                        with wave.open(file_path, 'rb') as w_file:
+                            duration_sec = w_file.getnframes() / float(w_file.getframerate())
+                    except Exception:
+                        pass
+                
+                # 2. Try OpenCV FFmpeg backend for .mp3, .m4a, and .mp4 videos
+                if duration_sec <= 0 and CV2_AVAILABLE:
+                    try:
+                        cap = cv2.VideoCapture(file_path)
+                        fps = cap.get(cv2.CAP_PROP_FPS)
+                        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                        if fps > 0:
+                            duration_sec = frames / fps
+                        cap.release()
+                    except Exception:
+                        pass
+                        
+                if duration_sec > 0:
+                    item_w = int(duration_sec * 100)
+                    max_w = item_w
 
             new_item = {
                 "id": f"{drop_type}_{random.randint(10000, 99999)}",
@@ -561,7 +618,7 @@ class TracksCanvas(QWidget):
                 "file_path": file_path, 
                 "x": logical_x,
                 "w": item_w,
-                "max_w": float('inf'),
+                "max_w": max_w,
                 "source_in": 0
             }
             
@@ -642,12 +699,43 @@ class TracksCanvas(QWidget):
         logical_x = self.logical_playhead
         
         item_w = 1000
-        if drop_type == "caption":
+        max_w = float('inf')
+        
+        if data.get("duration"):
+            item_w = int(float(data.get("duration")) * 100)
+            if subtype in ["video", "audio"]: max_w = item_w
+        elif drop_type == "caption":
             item_w = 400
         elif drop_type == "effect":
             item_w = 1500
         elif subtype == "image":
             item_w = int(app_config.get_setting("default_image_duration", 5.0) * 100)
+        elif subtype in ["video", "audio"] and file_path:
+            duration_sec = 0
+            # 1. Try native wave module for flawless .wav parsing
+            if file_path.lower().endswith('.wav'):
+                try:
+                    import wave
+                    with wave.open(file_path, 'rb') as w_file:
+                        duration_sec = w_file.getnframes() / float(w_file.getframerate())
+                except Exception:
+                    pass
+            
+            # 2. Try OpenCV FFmpeg backend for .mp3, .m4a, and .mp4 videos
+            if duration_sec <= 0 and CV2_AVAILABLE:
+                try:
+                    cap = cv2.VideoCapture(file_path)
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                    if fps > 0:
+                        duration_sec = frames / fps
+                    cap.release()
+                except Exception:
+                    pass
+                    
+            if duration_sec > 0:
+                item_w = int(duration_sec * 100)
+                max_w = item_w
 
         new_item = {
             "id": f"{drop_type}_{random.randint(10000, 99999)}",
@@ -657,7 +745,7 @@ class TracksCanvas(QWidget):
             "file_path": file_path,
             "x": logical_x,
             "w": item_w,
-            "max_w": float('inf'),
+            "max_w": max_w,
             "source_in": 0
         }
 
@@ -1626,9 +1714,14 @@ class TracksCanvas(QWidget):
                         if px:
                             painter.save()
                             painter.setClipRect(rect)
-                            num_thumbs = rect.width() // px.width() + 1
-                            for i in range(num_thumbs):
-                                painter.drawPixmap(rect.left() + i * px.width(), rect.top(), px)
+                            
+                            px_w = px.width()
+                            item_phys_x = rect.left()
+                            start_i = max(0, (visible_left - item_phys_x) // px_w)
+                            end_i = min(rect.width() // px_w + 1, (visible_right - item_phys_x) // px_w + 2)
+                            
+                            for i in range(start_i, end_i):
+                                painter.drawPixmap(item_phys_x + i * px_w, rect.top(), px)
                             
                             overlay_color = QColor(0, 0, 0, 140) if not is_selected and not is_hovered else QColor(0, 0, 0, 90)
                             painter.fillRect(rect, overlay_color)
@@ -1641,18 +1734,21 @@ class TracksCanvas(QWidget):
                         
                         thumb_w_physical = int(target_height * 1.777) # 16:9 approx fallback size
                         if thumb_w_physical < 10: thumb_w_physical = 100
-                        num_thumbs = rect.width() // thumb_w_physical + 1
+                        
+                        item_phys_x = rect.left()
+                        start_i = max(0, (visible_left - item_phys_x) // thumb_w_physical)
+                        end_i = min(rect.width() // thumb_w_physical + 1, (visible_right - item_phys_x) // thumb_w_physical + 2)
                         
                         source_in = item.get("source_in", 0)
                         
-                        for i in range(num_thumbs):
+                        for i in range(start_i, end_i):
                             logical_offset = (i * thumb_w_physical) / z
                             # 10 units = 1000ms. So 1 unit = 100ms offset.
                             time_ms = (source_in + logical_offset) * 100
                             
                             px = self._get_dynamic_thumbnail(item, time_ms, target_height)
                             if px:
-                                painter.drawPixmap(rect.left() + i * thumb_w_physical, rect.top(), px)
+                                painter.drawPixmap(item_phys_x + i * thumb_w_physical, rect.top(), px)
                         
                         overlay_color = QColor(0, 0, 0, 140) if not is_selected and not is_hovered else QColor(0, 0, 0, 90)
                         painter.fillRect(rect, overlay_color)
