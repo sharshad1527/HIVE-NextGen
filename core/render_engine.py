@@ -64,6 +64,7 @@ class RenderEngine(QThread):
         with QMutexLocker(self.mutex):
             self.preview_preset = preset_data
             self.preview_target_clip_id = target_clip_id
+            self.preview_start_ms = self.playhead_logical * 10
             self._force_render = True
 
     def _clear_readers(self):
@@ -121,7 +122,9 @@ class RenderEngine(QThread):
         
         if ptype == "transition":
             clip = copy.copy(original_clip)
-            clip.applied_effects = {}
+            clip.applied_effects = copy.deepcopy(original_clip.applied_effects) if isinstance(original_clip.applied_effects, dict) else {}
+            clip.applied_effects.pop("transition_in", None)
+            clip.applied_effects.pop("transition_out", None)
             clip.transition_in = None
             clip.transition_out = None
             if target_clip_id and clip.clip_id == target_clip_id:
@@ -136,10 +139,11 @@ class RenderEngine(QThread):
             return original_clip
             
         clip = copy.copy(original_clip)
-        # Clear existing applied effects and transitions to cleanly preview what the user is hovering/clicking!
-        clip.applied_effects = {}
-        clip.transition_in = None
-        clip.transition_out = None
+        clip.applied_effects = copy.deepcopy(original_clip.applied_effects) if isinstance(original_clip.applied_effects, dict) else {}
+        
+        if ptype == "effect":
+            clip.applied_effects.pop("applied_effects", None)
+            clip.applied_effects.pop("primary_effect", None)
         
         pname = self.preview_preset.get("title")
         props = self.preview_preset.get("preset_properties", {})
@@ -192,9 +196,13 @@ class RenderEngine(QThread):
 
         for track in reversed_tracks:
             if track.is_hidden: continue
-            if is_transition_preview and track.track_id != "video_1": continue
             
             for original_clip in track.clips:
+                if is_transition_preview:
+                    target_id = getattr(self, "preview_target_clip_id", None)
+                    if target_id and original_clip.clip_id != target_id:
+                        continue
+                        
                 clip = self._get_effective_clip(original_clip)
                 if clip.start_time <= current_ms < clip.end_time:
                     
@@ -235,7 +243,8 @@ class RenderEngine(QThread):
             defaults["text"] = "Preview Caption"
             defaults["preset_name"] = self.preview_preset.get("name", "Standard")
             
-            fake_clip = ClipData(file_path="", start_time=int(current_ms), end_time=int(current_ms)+5000, clip_type="caption", applied_effects=defaults)
+            start_ms = getattr(self, "preview_start_ms", current_ms)
+            fake_clip = ClipData(file_path="", start_time=int(start_ms), end_time=int(start_ms)+5000, clip_type="caption", applied_effects=defaults)
             self._draw_caption(painter, fake_clip, current_ms, proj_w, proj_h)
                         
         painter.end()

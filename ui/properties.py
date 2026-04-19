@@ -64,27 +64,27 @@ class PropertiesPanel(QFrame):
         self.spinbox_style = """
             QSpinBox, QDoubleSpinBox {
                 background-color: #1f1f23; border: 1px solid #333338;
-                border-radius: 6px; color: #d1d1d1; padding: 4px 22px 4px 4px; font-family: 'Inter', sans-serif; font-size: 11px;
+                border-radius: 6px; color: #d1d1d1; padding: 4px 28px 4px 8px; font-family: 'Inter', sans-serif; font-size: 11px;
             }
             QSpinBox::up-button, QDoubleSpinBox::up-button {
                 subcontrol-origin: border; subcontrol-position: top right;
-                width: 14px; border-left: 1px solid #333338;
+                width: 16px; border-left: 1px solid #333338;
                 border-bottom: 1px solid #333338; border-top-right-radius: 4px; background: #2b2b30;
             }
             QSpinBox::down-button, QDoubleSpinBox::down-button {
                 subcontrol-origin: border; subcontrol-position: bottom right;
-                width: 14px; border-left: 1px solid #333338;
+                width: 16px; border-left: 1px solid #333338;
                 border-bottom-right-radius: 4px; background: #2b2b30;
             }
             QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
                 background: #3a3a40;
             }
             QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
-                image: url('data:image/svg+xml;utf8,<svg width="8" height="6" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5 0L10 6H0L5 0Z" fill="%23d1d1d1"/></svg>');
+                image: url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAiIGhlaWdodD0iNiIgdmlld0JveD0iMCAwIDEwIDYiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTUgMEwxMCA2SDBMNSAwWiIgZmlsbD0iI2QxZDFkMSIvPjwvc3ZnPg==');
                 width: 7px; height: 5px;
             }
             QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
-                image: url('data:image/svg+xml;utf8,<svg width="8" height="6" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5 6L0 0H10L5 6Z" fill="%23d1d1d1"/></svg>');
+                image: url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAiIGhlaWdodD0iNiIgdmlld0JveD0iMCAwIDEwIDYiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTUgNkwwIDBIMTBMNSA2WiIgZmlsbD0iI2QxZDFkMSIvPjwvc3ZnPg==');
                 width: 7px; height: 5px;
             }
         """
@@ -564,7 +564,7 @@ class PropertiesPanel(QFrame):
         x_spin.setRange(min_val, max_val)
         x_spin.setValue(int(current_x))
         x_spin.setButtonSymbols(QSpinBox.NoButtons)
-        x_spin.setStyleSheet(self.spinbox_style)
+        x_spin.setStyleSheet(self.spinbox_style + "QSpinBox { padding-right: 8px; }")
         x_spin.setAlignment(Qt.AlignCenter)
 
         lbl_y = QLabel("Y:")
@@ -573,7 +573,7 @@ class PropertiesPanel(QFrame):
         y_spin.setRange(min_val, max_val)
         y_spin.setValue(int(current_y))
         y_spin.setButtonSymbols(QSpinBox.NoButtons)
-        y_spin.setStyleSheet(self.spinbox_style)
+        y_spin.setStyleSheet(self.spinbox_style + "QSpinBox { padding-right: 8px; }")
         y_spin.setAlignment(Qt.AlignCenter)
 
         x_spin.valueChanged.connect(lambda v: self._on_prop_change("Position_X", v, commit=True))

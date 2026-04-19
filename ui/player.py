@@ -617,27 +617,37 @@ class PlayerPanel(QFrame):
         
         # Context-Aware Timeline Previewing for Presets
         if preset_type in ["effect", "caption", "transition"]:
+            if not self.is_preview_mode or not hasattr(self, '_original_playhead'):
+                self._original_playhead = self.playhead
+                
             self.is_preview_mode = True
             self.is_timeline_preview = True
-            self.preview_duration = 4500  # 4.5 seconds loop limit
+            self.preview_duration = 5000  # 5 seconds loop limit
             self.preview_position = 0
             self.preview_loops = 0
             
+            # Start preview from current timeline cursor position by default
+            preview_start_ms = self._original_playhead * 10
+            
             if preset_type == "transition" and hasattr(self, "timeline_canvas") and getattr(self, "timeline_canvas", None):
                 clip = None
-                # Try to use V1 to show the transition in full glory optimally jumping back to 2 seconds before the end of the clip under playhead
                 project = project_manager.current_project
                 if project:
                     for t in project.tracks:
                         if t.track_id == "video_1":
                             for c in t.clips:
-                                if c.start_time <= self.playhead * 10 < c.end_time:
+                                if c.start_time <= self._original_playhead * 10 < c.end_time:
                                     clip = c
                                     break
                 if clip:
-                    target_ms = max(clip.start_time, clip.end_time - 2000)
+                    # Jump internal playhead to just before the transition
+                    target_ms = max(clip.start_time, clip.end_time - 3000)
                     self.playhead = target_ms / 10.0
-                    self.playhead_seek_requested.emit(int(self.playhead))
+                    self.preview_duration = 4000
+                else:
+                    self.playhead = self._original_playhead
+            else:
+                self.playhead = self._original_playhead
             
             self.playback_start_time = time.time()
             self.playback_start_playhead = self.playhead
@@ -870,26 +880,16 @@ class PlayerPanel(QFrame):
         new_pos = self.playback_start_playhead + (elapsed * 100.0)
         
         if self.is_timeline_preview:
-            if elapsed > 4.5: 
-                if not hasattr(self, 'preview_loops'):
-                    self.preview_loops = 0
-                self.preview_loops += 1
-                
-                if self.preview_loops >= 3:
-                    self.is_preview_mode = False
-                    self.is_timeline_preview = False
-                    self.preview_loops = 0
-                    if hasattr(self.render_engine, 'set_preview_preset'):
-                        self.render_engine.set_preview_preset(None)
-                    if self.is_playing:
-                        self.toggle_play()
-                    self.render_engine.request_frame(int(self.playhead))
-                else:
-                    self.playback_start_time = time.time()
+            # preview_duration is stored in ms
+            duration_sec = getattr(self, 'preview_duration', 5000) / 1000.0
+            if elapsed > duration_sec:
+                # Infinitely loop internally without emitting playhead seek
+                self.playback_start_time = time.time()
+                self.playhead = self.playback_start_playhead
             else:
                 self.playhead = new_pos
                 self._update_timecode_label(preview=False)
-                self.playhead_seek_requested.emit(int(self.playhead))
+                # DO NOT EMIT playhead_seek_requested to prevent timeline from moving
                 self.render_engine.request_frame(int(self.playhead))
                 self._sync_timeline_audio(int(self.playhead))
             return
@@ -974,6 +974,8 @@ class PlayerPanel(QFrame):
             self.media_stack.setCurrentWidget(self.timeline_canvas)
             if self.is_playing:
                 self.toggle_play()
+            if hasattr(self, '_original_playhead'):
+                delattr(self, '_original_playhead')
             
         self.playhead = playhead_logical
         self._update_timecode_label()
