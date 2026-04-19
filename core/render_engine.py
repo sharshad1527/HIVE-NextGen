@@ -192,8 +192,7 @@ class RenderEngine(QThread):
             local_ms = (current_ms - clip.start_time) + trim_in_ms
             current_pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
             
-            # FIX: Prevent violent micro-stuttering by only seeking on major jumps.
-            # Small offsets will be caught up instantly using continuous reads.
+            # Prevent violent micro-stuttering by only seeking on major jumps.
             diff = local_ms - current_pos_ms
             
             if diff < -70 or diff > 200:
@@ -222,7 +221,23 @@ class RenderEngine(QThread):
                 qimg = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
                 
         elif clip.clip_type == "image":
-            qimg = QImage(file_path)
+            # FIX: Native OpenCV loader handles transparent PNGs perfectly for multi-track overlays
+            img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+            if img is not None:
+                if len(img.shape) == 3 and img.shape[2] == 4: # Has Alpha Channel
+                    img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
+                    h, w, ch = img.shape
+                    bytes_per_line = ch * w
+                    qimg = QImage(img.data, w, h, bytes_per_line, QImage.Format_RGBA8888).copy()
+                else: # Standard RGB Image
+                    # FIX: Handle pure Grayscale Images (2 dimensions) safely to prevent crashes
+                    if len(img.shape) == 2:
+                        img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                    elif len(img.shape) == 3 and img.shape[2] == 3:
+                        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    h, w, ch = img.shape
+                    bytes_per_line = ch * w
+                    qimg = QImage(img.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
 
         if qimg and not qimg.isNull():
             props = clip.applied_effects or {}

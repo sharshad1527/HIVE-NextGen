@@ -435,7 +435,7 @@ class TracksCanvas(QWidget):
                 event.acceptProposedAction()
             elif not target_track_group:
                 ty = 32 + sum(t["height"] for t in self.track_defs)
-                th = 48 if expected_group == "caption" else 64
+                th = 48 if expected_group == "caption" else 80 if expected_group == "video" else 64
                 w = 150 if drop_type == "caption" else 300
                 self._drop_target_rect = QRect(int(logical_x * z), ty, w, th)
                 self._drop_target_type = "track_new"
@@ -607,6 +607,10 @@ class TracksCanvas(QWidget):
         self.history = self.history[:self.history_idx + 1]
         self.history.append(copy.deepcopy(self.items))
         self.history_idx += 1
+        
+        # CRITICAL FIX: Force the UI to push its layout to the Engine's Backend Brain immediately!
+        # This guarantees the RenderEngine sees dropped images and the AudioEngine tracks dragged clips.
+        self.sync_to_project()
         
         self.state_changed.emit()
         
@@ -1032,7 +1036,7 @@ class TracksCanvas(QWidget):
                     icon = "mdi6.auto-fix"
                     if group == "caption": icon = "mdi6.comment-text-outline"
                     if group == "video": icon = "mdi6.movie-open-outline"
-                    height = 64 if group == "video" else 48
+                    height = 80 if group == "video" else 48 # INCREASED TO 80 FOR VIDEO TRACKS
                     new_defs.append({"id": new_id, "group": group, "label": label, "icon": icon, "height": height})
             else:
                 for i in range(len(sorted_old_tracks)):
@@ -1713,40 +1717,44 @@ class TracksCanvas(QWidget):
                 painter.fillPath(path, bg_color)
                 painter.drawPath(path)
                 
+                # Split rect for thumb and waveform to prevent overlay
+                has_wave = item["type"] == "video" and item.get("waveform")
+                thumb_h = int((th - 8) * 0.65) if has_wave else int(th - 8)
+                thumb_rect = QRect(rect.left(), rect.top(), rect.width(), thumb_h)
+                
                 # DYNAMIC THUMBNAIL RENDERING BLOCK
-                target_height = int(th - 8)
-                if target_height > 0:
+                if thumb_h > 0:
                     if item["type"] == "image":
                         # For static images, seamlessly tile the one thumbnail
                         thumb_path = item.get("file_path")
-                        px = self._get_pixmap(thumb_path, target_height)
+                        px = self._get_pixmap(thumb_path, thumb_h)
                         if px:
                             painter.save()
-                            painter.setClipRect(rect)
+                            painter.setClipRect(thumb_rect)
                             
                             px_w = px.width()
-                            item_phys_x = rect.left()
+                            item_phys_x = thumb_rect.left()
                             start_i = max(0, (visible_left - item_phys_x) // px_w)
-                            end_i = min(rect.width() // px_w + 1, (visible_right - item_phys_x) // px_w + 2)
+                            end_i = min(thumb_rect.width() // px_w + 1, (visible_right - item_phys_x) // px_w + 2)
                             
                             for i in range(start_i, end_i):
-                                painter.drawPixmap(item_phys_x + i * px_w, rect.top(), px)
+                                painter.drawPixmap(item_phys_x + i * px_w, thumb_rect.top(), px)
                             
                             overlay_color = QColor(0, 0, 0, 140) if not is_selected and not is_hovered else QColor(0, 0, 0, 90)
-                            painter.fillRect(rect, overlay_color)
+                            painter.fillRect(thumb_rect, overlay_color)
                             painter.restore()
                             
                     elif item["type"] == "video":
                         # For video, extract actual timestamps based on timeline length scaling
                         painter.save()
-                        painter.setClipRect(rect)
+                        painter.setClipRect(thumb_rect)
                         
-                        thumb_w_physical = int(target_height * 1.777) # 16:9 approx fallback size
+                        thumb_w_physical = int(thumb_h * 1.777) # 16:9 approx fallback size
                         if thumb_w_physical < 10: thumb_w_physical = 100
                         
-                        item_phys_x = rect.left()
+                        item_phys_x = thumb_rect.left()
                         start_i = max(0, (visible_left - item_phys_x) // thumb_w_physical)
-                        end_i = min(rect.width() // thumb_w_physical + 1, (visible_right - item_phys_x) // thumb_w_physical + 2)
+                        end_i = min(thumb_rect.width() // thumb_w_physical + 1, (visible_right - item_phys_x) // thumb_w_physical + 2)
                         
                         source_in = item.get("source_in", 0)
                         
@@ -1755,24 +1763,24 @@ class TracksCanvas(QWidget):
                             # FIX: 100 units = 1000ms. So 1 unit = 10ms offset.
                             time_ms = (source_in + logical_offset) * 10
                             
-                            px = self._get_dynamic_thumbnail(item, time_ms, target_height)
+                            px = self._get_dynamic_thumbnail(item, time_ms, thumb_h)
                             if px:
-                                painter.drawPixmap(item_phys_x + i * thumb_w_physical, rect.top(), px)
+                                painter.drawPixmap(item_phys_x + i * thumb_w_physical, thumb_rect.top(), px)
                         
                         overlay_color = QColor(0, 0, 0, 140) if not is_selected and not is_hovered else QColor(0, 0, 0, 90)
-                        painter.fillRect(rect, overlay_color)
+                        painter.fillRect(thumb_rect, overlay_color)
                         painter.restore()
                 
                 # DRAW WAVEFORM OVERLAY FOR VIDEO
-                if item["type"] == "video" and item.get("waveform"):
+                if has_wave:
                     wave_data = item.get("waveform", [])
                     if wave_data:
                         painter.save()
-                        painter.setClipRect(rect)
                         
-                        # Draw a dark background strip for the waveform
-                        wave_bg_h = int((th - 8) * 0.35)
-                        wave_bg_rect = QRect(rect.left(), rect.bottom() - wave_bg_h, rect.width(), wave_bg_h)
+                        wave_bg_h = rect.height() - thumb_h
+                        wave_bg_rect = QRect(rect.left(), thumb_rect.bottom(), rect.width(), wave_bg_h)
+                        
+                        painter.setClipRect(wave_bg_rect)
                         painter.fillRect(wave_bg_rect, QColor(0, 0, 0, 150))
                         
                         wave_color = QColor(230, 107, 44, 220) if is_selected else QColor(0, 150, 150, 180) # Orange selected, Aqua unselected

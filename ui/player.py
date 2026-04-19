@@ -313,12 +313,17 @@ class PlayerPanel(QFrame):
                 self.btn_play.setIcon(qta.icon('mdi6.play', color='#e66b2c'))
 
     # ================== AUDIO MIXING ENGINE ==================
-    def _sync_timeline_audio(self, current_ms):
+    def _sync_timeline_audio(self, logical_pos):
         """Dynamically spins up QMediaPlayers to playback intersecting audio for the entire timeline."""
         project = project_manager.current_project
         if not project: return
         
         active_clip_ids = set()
+        
+        # CRITICAL FIX: Convert logical playhead units to actual milliseconds!
+        # Without this, the Player's MS position violently clashes with the logical ticks,
+        # causing the audio to aggressively rewind and loop every 2 seconds.
+        current_ms = int(logical_pos * 10)
         
         for track in project.tracks:
             if track.is_muted or track.is_hidden: continue
@@ -360,9 +365,14 @@ class PlayerPanel(QFrame):
                             elif not self.is_playing and player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
                                 player.pause()
                                 
-                            # Hard seek if it falls out of sync
-                            if abs(player.position() - local_ms) > 150:
-                                player.setPosition(local_ms)
+                            # FIX: Prevent Audio Stuttering by loosening the drift-tolerance when actively playing!
+                            diff = abs(player.position() - local_ms)
+                            if self.is_playing:
+                                if diff > 800: # Only hard seek if it drifts massively during playback to prevent micro-stutters
+                                    player.setPosition(local_ms)
+                            else:
+                                if diff > 50: # Snap tightly while paused or scrubbing
+                                    player.setPosition(local_ms)
                                 
         # Cleanup inactive players that have passed out of bounds
         stale_ids = set(self.audio_players.keys()) - active_clip_ids
