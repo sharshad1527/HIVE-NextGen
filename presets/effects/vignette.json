@@ -1,0 +1,11 @@
+{
+    "name": "Vignette",
+    "icon": "mdi6.circle-opacity",
+    "category": "effects",
+    "properties": {
+        "intensity": {"type": "slider", "min": 0, "max": 100, "default": 50, "suffix": "%"},
+        "radius": {"type": "slider", "min": 10, "max": 100, "default": 70, "suffix": "%"},
+        "softness": {"type": "slider", "min": 0, "max": 100, "default": 50, "suffix": "%"},
+        "color": {"type": "color", "default": "#000000"}
+    }
+}

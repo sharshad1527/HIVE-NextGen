@@ -1,0 +1,9 @@
+{
+    "name": "Gaussian Blur",
+    "icon": "mdi6.blur",
+    "category": "effects",
+    "properties": {
+        "intensity": {"type": "slider", "min": 0, "max": 100, "default": 50, "suffix": "%"},
+        "radius": {"type": "slider", "min": 1, "max": 100, "default": 15, "suffix": "px"}
+    }
+}

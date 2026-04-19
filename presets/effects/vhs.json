@@ -1,0 +1,11 @@
+{
+    "name": "VHS Retro",
+    "icon": "mdi6.vhs",
+    "category": "effects",
+    "properties": {
+        "intensity": {"type": "slider", "min": 0, "max": 100, "default": 70, "suffix": "%"},
+        "scanline_opacity": {"type": "slider", "min": 0, "max": 100, "default": 40, "suffix": "%"},
+        "chromatic_shift": {"type": "slider", "min": 0, "max": 20, "default": 5, "suffix": "px"},
+        "noise": {"type": "slider", "min": 0, "max": 100, "default": 30, "suffix": "%"}
+    }
+}

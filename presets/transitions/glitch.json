@@ -1,0 +1,10 @@
+{
+    "name": "Glitch",
+    "icon": "mdi6.flash-outline",
+    "category": "transitions",
+    "properties": {
+        "duration": {"type": "slider", "min": 5, "max": 60, "default": 10, "suffix": " frames"},
+        "intensity": {"type": "slider", "min": 0, "max": 100, "default": 60, "suffix": "%"},
+        "block_size": {"type": "slider", "min": 2, "max": 50, "default": 8, "suffix": "px"}
+    }
+}

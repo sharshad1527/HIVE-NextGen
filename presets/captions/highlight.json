@@ -1,0 +1,16 @@
+{
+    "name": "Highlight",
+    "icon": "mdi6.format-color-highlight",
+    "category": "captions",
+    "properties": {
+        "font_family": {"type": "combo", "options": ["Roboto", "Arial", "Sour Gummy", "Montserrat", "Inter", "Poppins"], "default": "Inter"},
+        "font_size": {"type": "slider", "min": 10, "max": 200, "default": 52, "suffix": ""},
+        "text_color": {"type": "color", "default": "#FFFFFF"},
+        "highlight_color": {"type": "color", "default": "#FFD700"},
+        "highlight_opacity": {"type": "slider", "min": 0, "max": 100, "default": 80, "suffix": "%"},
+        "position_y": {"type": "slider", "min": -500, "max": 500, "default": 350, "suffix": "px"},
+        "outline_width": {"type": "slider", "min": 0, "max": 10, "default": 3, "suffix": "px"},
+        "outline_color": {"type": "color", "default": "#000000"},
+        "shadow_offset": {"type": "slider", "min": 0, "max": 20, "default": 4, "suffix": "px"}
+    }
+}

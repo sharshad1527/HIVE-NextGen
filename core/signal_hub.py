@@ -7,7 +7,7 @@ class SignalHub(QObject):
     UI panels will listen to these signals instead of talking to each other directly.
     """
     # Timeline Events
-    clip_selected = Signal(str)         # Emits the clip_id (str)
+    clip_selected = Signal(str, str)    # Emits item_type, clip_id
     clip_deselected = Signal()          # Emits when background is clicked
     
     # Project Events
@@ -20,6 +20,9 @@ class SignalHub(QObject):
     
     # Media Events
     waveform_ready = Signal(str, list)  # Emits file_path, peaks_array
+    
+    # Transform Events (Preview Player -> Properties Panel sync)
+    clip_transform_changed = Signal(str, str, object)  # clip_id, property_name, new_value
 
 # We create ONE global instance of this hub. 
 # Everywhere else in the app, you will just: `from core.signal_hub import global_signals`

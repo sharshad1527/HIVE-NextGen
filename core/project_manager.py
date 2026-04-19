@@ -259,6 +259,10 @@ class ProjectManager:
         tracks_data = data.pop('tracks', [])
         tracks = []
         
+        # FIX: msgpack deserializes tuples as lists — convert resolution back to tuple
+        if 'resolution' in data and isinstance(data['resolution'], list):
+            data['resolution'] = tuple(data['resolution'])
+        
         for t_data in tracks_data:
             clips_data = t_data.pop('clips', [])
             clips = [ClipData(**c) for c in clips_data]

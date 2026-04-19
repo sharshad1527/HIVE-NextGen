@@ -1,0 +1,15 @@
+{
+    "name": "Typewriter",
+    "icon": "mdi6.keyboard-outline",
+    "category": "captions",
+    "properties": {
+        "font_family": {"type": "combo", "options": ["Courier New", "Roboto Mono", "Source Code Pro", "Fira Code"], "default": "Courier New"},
+        "font_size": {"type": "slider", "min": 10, "max": 200, "default": 44, "suffix": ""},
+        "text_color": {"type": "color", "default": "#00FF00"},
+        "bg_color": {"type": "color", "default": "#000000"},
+        "bg_opacity": {"type": "slider", "min": 0, "max": 100, "default": 80, "suffix": "%"},
+        "position_y": {"type": "slider", "min": -500, "max": 500, "default": 350, "suffix": "px"},
+        "cursor_visible": {"type": "combo", "options": ["Yes", "No"], "default": "Yes"},
+        "speed": {"type": "slider", "min": 10, "max": 200, "default": 100, "suffix": "%"}
+    }
+}

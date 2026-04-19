@@ -7,8 +7,8 @@ import hashlib
 import math
 from PySide6.QtWidgets import (QFrame, QVBoxLayout, QHBoxLayout, QPushButton, 
                                QLabel, QSlider, QWidget, QStackedWidget, QComboBox, QApplication)
-from PySide6.QtCore import Qt, Signal, QTimer, QUrl, QRect
-from PySide6.QtGui import QPixmap, QPainter
+from PySide6.QtCore import Qt, Signal, QTimer, QUrl, QRect, QRectF, QPointF
+from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QCursor
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtMultimediaWidgets import QVideoWidget
 
@@ -19,22 +19,121 @@ from core.app_config import app_config
 
 
 class TimelinePreviewCanvas(QWidget):
-    """Custom drawing surface for the RenderEngine frames"""
+    """Custom drawing surface for the RenderEngine frames with interactive clip manipulation."""
+    
+    transform_changed = Signal(str, str, object)  # clip_id, prop_name, value
+    
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_frame = None
         self.setStyleSheet("background-color: #000000; border-radius: 8px;")
+        self.setMouseTracking(True)
+        
+        # Interactive state
+        self._selected_clip_id = ""
+        self._selected_clip_bounds = None  # QRectF in canvas coordinates
+        self._dragging = False
+        self._rotating = False
+        self._drag_start = QPointF()
+        self._drag_start_pos = (0, 0)  # Original Position_X, Position_Y
+        self._drag_start_rotation = 0
+        self._show_handles = False
+        
+        # Project coordinate mapping
+        self._canvas_scale = 1.0
+        self._canvas_offset_x = 0
+        self._canvas_offset_y = 0
+        self._proj_w = 1920
+        self._proj_h = 1080
         
     def set_frame(self, qimage):
         self.current_frame = qimage
         self.update() 
+    
+    def _update_canvas_mapping(self):
+        """Calculate the mapping between canvas widget coords and project coords."""
+        if self.current_frame and not self.current_frame.isNull():
+            cw, ch = self.width(), self.height()
+            fw, fh = self.current_frame.width(), self.current_frame.height()
+            if fw > 0 and fh > 0:
+                self._canvas_scale = min(cw / fw, ch / fh)
+                nw = fw * self._canvas_scale
+                nh = fh * self._canvas_scale
+                self._canvas_offset_x = (cw - nw) / 2
+                self._canvas_offset_y = (ch - nh) / 2
+    
+    def _canvas_to_project(self, canvas_point):
+        """Convert canvas widget coordinates to project coordinates."""
+        self._update_canvas_mapping()
+        if self._canvas_scale == 0:
+            return QPointF(0, 0)
         
+        # Get the project resolution
+        project = project_manager.current_project
+        if project:
+            self._proj_w, self._proj_h = project.resolution
+        
+        # Canvas coords -> normalized frame coords -> project coords
+        frame_x = (canvas_point.x() - self._canvas_offset_x) / self._canvas_scale
+        frame_y = (canvas_point.y() - self._canvas_offset_y) / self._canvas_scale
+        
+        # Frame coords are at render_scale, but project coords are at full resolution
+        render_engine_scale = 1.0  # The render engine's scale
+        proj_x = frame_x / render_engine_scale
+        proj_y = frame_y / render_engine_scale
+        
+        return QPointF(proj_x, proj_y)
+    
+    def _get_selected_clip_data(self):
+        """Get the currently selected clip's data from the project."""
+        if not self._selected_clip_id or not project_manager.current_project:
+            return None
+        for track in project_manager.current_project.tracks:
+            for clip in track.clips:
+                if clip.clip_id == self._selected_clip_id:
+                    return clip
+        return None
+    
+    def set_selected_clip(self, clip_id):
+        """Called when a clip is selected on the timeline."""
+        self._selected_clip_id = clip_id
+        self._show_handles = bool(clip_id)
+        self.update()
+    
+    def _get_clip_screen_bounds(self, clip):
+        """Calculate the on-screen bounds of a clip for handle drawing."""
+        if not clip or not self.current_frame:
+            return None
+        
+        props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
+        pos_x = props.get("Position_X", 0)
+        pos_y = props.get("Position_Y", 0)
+        scale_pct = props.get("Scale", 100) / 100.0
+        
+        self._update_canvas_mapping()
+        
+        # The clip is rendered centered in the project canvas, offset by Position_X/Y
+        center_x = (self._proj_w / 2) + pos_x
+        center_y = (self._proj_h / 2) + pos_y
+        
+        # Approximate visible size (assumes clip fills frame)
+        half_w = (self._proj_w / 2) * scale_pct
+        half_h = (self._proj_h / 2) * scale_pct
+        
+        # Convert to canvas widget coordinates
+        render_scale = self._canvas_scale
+        cx = self._canvas_offset_x + center_x * render_scale
+        cy = self._canvas_offset_y + center_y * render_scale
+        hw = half_w * render_scale
+        hh = half_h * render_scale
+        
+        return QRectF(cx - hw, cy - hh, hw * 2, hh * 2)
+    
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.fillRect(self.rect(), Qt.black)
         
         if self.current_frame and not self.current_frame.isNull():
-            # Optimization: Mathematical scaling avoids creating massive QImage clones in RAM 30 times a second
             cw, ch = self.width(), self.height()
             fw, fh = self.current_frame.width(), self.current_frame.height()
             
@@ -43,8 +142,170 @@ class TimelinePreviewCanvas(QWidget):
                 nw, nh = int(fw * ratio), int(fh * ratio)
                 x, y = (cw - nw) // 2, (ch - nh) // 2
                 
-                painter.setRenderHint(QPainter.SmoothPixmapTransform, False) # Fast render for playback
+                painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
                 painter.drawImage(QRect(x, y, nw, nh), self.current_frame)
+        
+        # Draw selection handles
+        if self._show_handles and self._selected_clip_id:
+            clip = self._get_selected_clip_data()
+            if clip and clip.clip_type in ("video", "image", "caption"):
+                bounds = self._get_clip_screen_bounds(clip)
+                if bounds:
+                    # Selection box
+                    painter.setPen(QPen(QColor("#e66b2c"), 2, Qt.DashLine))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawRect(bounds.toRect())
+                    
+                    # Corner handles
+                    handle_size = 8
+                    corners = [
+                        bounds.topLeft(), bounds.topRight(),
+                        bounds.bottomLeft(), bounds.bottomRight()
+                    ]
+                    painter.setPen(QPen(QColor("#ffffff"), 1))
+                    painter.setBrush(QColor("#e66b2c"))
+                    for corner in corners:
+                        painter.drawRect(QRectF(
+                            corner.x() - handle_size/2, corner.y() - handle_size/2,
+                            handle_size, handle_size
+                        ).toRect())
+                    
+                    # Rotation handle (circle above the top center)
+                    top_center = QPointF(bounds.center().x(), bounds.top() - 25)
+                    painter.setPen(QPen(QColor("#ffffff"), 1))
+                    painter.setBrush(QColor("#4299e1"))
+                    painter.drawEllipse(top_center, 6, 6)
+                    
+                    # Line from top center of bounds to rotation handle
+                    painter.setPen(QPen(QColor("#4299e1"), 1))
+                    painter.drawLine(
+                        int(bounds.center().x()), int(bounds.top()),
+                        int(top_center.x()), int(top_center.y() + 6)
+                    )
+        
+        painter.end()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._show_handles and self._selected_clip_id:
+            clip = self._get_selected_clip_data()
+            if clip:
+                bounds = self._get_clip_screen_bounds(clip)
+                if bounds:
+                    pos = event.position()
+                    
+                    # Check rotation handle (circle above top center)
+                    rot_handle = QPointF(bounds.center().x(), bounds.top() - 25)
+                    if (pos - rot_handle).manhattanLength() < 20:
+                        self._rotating = True
+                        self._drag_start = pos
+                        props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
+                        self._drag_start_rotation = props.get("Rotation", 0)
+                        self.setCursor(Qt.ClosedHandCursor)
+                        return
+                    
+                    # Check if click is inside bounds (drag to move)
+                    if bounds.contains(pos):
+                        self._dragging = True
+                        self._drag_start = pos
+                        props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
+                        self._drag_start_pos = (props.get("Position_X", 0), props.get("Position_Y", 0))
+                        self.setCursor(Qt.ClosedHandCursor)
+                        return
+        
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._dragging and self._selected_clip_id:
+            delta = event.position() - self._drag_start
+            
+            # Convert pixel delta to project coordinates
+            self._update_canvas_mapping()
+            if self._canvas_scale > 0:
+                proj_dx = delta.x() / self._canvas_scale
+                proj_dy = delta.y() / self._canvas_scale
+                
+                new_x = int(self._drag_start_pos[0] + proj_dx)
+                new_y = int(self._drag_start_pos[1] + proj_dy)
+                
+                # Update the clip data directly
+                clip = self._get_selected_clip_data()
+                if clip and isinstance(clip.applied_effects, dict):
+                    clip.applied_effects["Position_X"] = new_x
+                    clip.applied_effects["Position_Y"] = new_y
+                    
+                    # Emit signals for properties panel sync
+                    self.transform_changed.emit(self._selected_clip_id, "Position_X", new_x)
+                    self.transform_changed.emit(self._selected_clip_id, "Position_Y", new_y)
+                    
+                    # Force re-render
+                    self.update()
+            return
+        
+        elif self._rotating and self._selected_clip_id:
+            clip = self._get_selected_clip_data()
+            if clip:
+                bounds = self._get_clip_screen_bounds(clip)
+                if bounds:
+                    center = bounds.center()
+                    
+                    # Calculate angle from center to current mouse position
+                    dx = event.position().x() - center.x()
+                    dy = event.position().y() - center.y()
+                    angle = math.degrees(math.atan2(dx, -dy))
+                    
+                    # Calculate angle from center to start position
+                    dx0 = self._drag_start.x() - center.x()
+                    dy0 = self._drag_start.y() - center.y()
+                    start_angle = math.degrees(math.atan2(dx0, -dy0))
+                    
+                    delta_angle = angle - start_angle
+                    new_rotation = int(max(-180, min(180, self._drag_start_rotation + delta_angle)))
+                    
+                    if isinstance(clip.applied_effects, dict):
+                        clip.applied_effects["Rotation"] = new_rotation
+                        self.transform_changed.emit(self._selected_clip_id, "Rotation", new_rotation)
+                        self.update()
+            return
+        
+        # Update cursor based on hover
+        if self._show_handles and self._selected_clip_id:
+            clip = self._get_selected_clip_data()
+            if clip:
+                bounds = self._get_clip_screen_bounds(clip)
+                if bounds:
+                    pos = event.position()
+                    rot_handle = QPointF(bounds.center().x(), bounds.top() - 25)
+                    if (pos - rot_handle).manhattanLength() < 20:
+                        self.setCursor(Qt.CrossCursor)
+                        return
+                    elif bounds.contains(pos):
+                        self.setCursor(Qt.OpenHandCursor)
+                        return
+        
+        self.setCursor(Qt.ArrowCursor)
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._dragging or self._rotating:
+            self._dragging = False
+            self._rotating = False
+            self.setCursor(Qt.ArrowCursor)
+            
+            # Trigger a save state on the timeline
+            # The timeline canvas listens for property changes via update_item_property
+            # and calls save_state, so we just need to emit at the property level
+            clip = self._get_selected_clip_data()
+            if clip and isinstance(clip.applied_effects, dict):
+                # Also update timeline items to keep in sync
+                global_signals.clip_transform_changed.emit(
+                    self._selected_clip_id, "Position_X", clip.applied_effects.get("Position_X", 0)
+                )
+                global_signals.clip_transform_changed.emit(
+                    self._selected_clip_id, "Position_Y", clip.applied_effects.get("Position_Y", 0)
+                )
+            return
+        
+        super().mouseReleaseEvent(event)
 
 
 class PlayerPanel(QFrame):
@@ -68,7 +329,7 @@ class PlayerPanel(QFrame):
         self.audio_players = {}
 
         self.play_timer = QTimer(self)
-        self.play_timer.setTimerType(Qt.PreciseTimer) # Optimization: Forces OS high-precision timing for buttery smooth framerates
+        self.play_timer.setTimerType(Qt.PreciseTimer)
         self.play_timer.timeout.connect(self._on_play_step)
 
         self.render_engine = RenderEngine()
@@ -106,6 +367,9 @@ class PlayerPanel(QFrame):
         
         self.video_widget = QVideoWidget()
         self.timeline_canvas = TimelinePreviewCanvas()
+        
+        # Connect interactive transform signals
+        self.timeline_canvas.transform_changed.connect(self._on_canvas_transform)
         
         self.media_stack.addWidget(self.placeholder_lbl)
         self.media_stack.addWidget(self.video_widget)
@@ -190,8 +454,31 @@ class PlayerPanel(QFrame):
         self.player.durationChanged.connect(self._on_player_duration_changed)
         self.player.playbackStateChanged.connect(self._on_player_state_changed)
         
+        # Listen for clip selection to enable interactive handles
+        global_signals.clip_selected.connect(self._on_clip_selected_for_preview)
+        global_signals.clip_deselected.connect(self._on_clip_deselected_for_preview)
+        
+        # Listen for property changes to force a re-render
+        global_signals.clip_transform_changed.connect(self._on_property_changed_rerender)
+        
         if QApplication.instance():
             QApplication.instance().aboutToQuit.connect(self._cleanup)
+
+    def _on_clip_selected_for_preview(self, clip_id):
+        """Enable interactive handles in the preview canvas when a clip is selected."""
+        self.timeline_canvas.set_selected_clip(clip_id)
+    
+    def _on_clip_deselected_for_preview(self):
+        """Disable interactive handles when no clip is selected."""
+        self.timeline_canvas.set_selected_clip("")
+
+    def _on_canvas_transform(self, clip_id, prop_name, value):
+        """Forward transform changes from the interactive canvas to the global signal hub."""
+        global_signals.clip_transform_changed.emit(clip_id, prop_name, value)
+
+    def _on_property_changed_rerender(self, clip_id, prop_name, value):
+        """Force re-render whenever any clip property changes (from panel or canvas)."""
+        self.render_engine.request_frame(int(self.playhead))
 
     def _on_timeline_frame_received(self, frame):
         self.timeline_canvas.set_frame(frame)
@@ -320,16 +607,12 @@ class PlayerPanel(QFrame):
         
         active_clip_ids = set()
         
-        # CRITICAL FIX: Convert logical playhead units to actual milliseconds!
-        # Without this, the Player's MS position violently clashes with the logical ticks,
-        # causing the audio to aggressively rewind and loop every 2 seconds.
         current_ms = int(logical_pos * 10)
         
         for track in project.tracks:
             if track.is_muted or track.is_hidden: continue
             for clip in track.clips:
                 if clip.clip_type in ["video", "audio"] and clip.file_path:
-                    # Is this clip currently intersecting the playhead?
                     if clip.start_time <= current_ms < clip.end_time:
                         active_clip_ids.add(clip.clip_id)
                         
@@ -340,7 +623,6 @@ class PlayerPanel(QFrame):
                             
                         local_ms = (current_ms - clip.start_time) + trim_in_ms
                         
-                        # Initialize a player if it doesn't exist
                         if clip.clip_id not in self.audio_players:
                             player = QMediaPlayer()
                             audio_output = QAudioOutput()
@@ -358,23 +640,20 @@ class PlayerPanel(QFrame):
                                 
                             self.audio_players[clip.clip_id] = {'player': player, 'output': audio_output}
                         else:
-                            # Sync existing player
                             player = self.audio_players[clip.clip_id]['player']
                             if self.is_playing and player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
                                 player.play()
                             elif not self.is_playing and player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
                                 player.pause()
                                 
-                            # FIX: Prevent Audio Stuttering by loosening the drift-tolerance when actively playing!
                             diff = abs(player.position() - local_ms)
                             if self.is_playing:
-                                if diff > 800: # Only hard seek if it drifts massively during playback to prevent micro-stutters
+                                if diff > 800:
                                     player.setPosition(local_ms)
                             else:
-                                if diff > 50: # Snap tightly while paused or scrubbing
+                                if diff > 50:
                                     player.setPosition(local_ms)
                                 
-        # Cleanup inactive players that have passed out of bounds
         stale_ids = set(self.audio_players.keys()) - active_clip_ids
         for clip_id in stale_ids:
             self.audio_players[clip_id]['player'].stop()
@@ -400,7 +679,6 @@ class PlayerPanel(QFrame):
             new_pos = self.duration
             self.toggle_play() 
             
-        # Optimization: Request frame immediately bypassing UI signal delays
         self.render_engine.request_frame(int(new_pos))
         self.playhead_seek_requested.emit(int(new_pos))
         self._sync_timeline_audio(int(new_pos))

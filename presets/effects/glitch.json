@@ -1,0 +1,10 @@
+{
+    "name": "Digital Glitch",
+    "icon": "mdi6.flash-outline",
+    "category": "effects",
+    "properties": {
+        "intensity": {"type": "slider", "min": 0, "max": 100, "default": 50, "suffix": "%"},
+        "block_size": {"type": "slider", "min": 2, "max": 50, "default": 10, "suffix": "px"},
+        "shift_amount": {"type": "slider", "min": 0, "max": 100, "default": 20, "suffix": "px"}
+    }
+}

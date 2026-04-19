@@ -268,13 +268,21 @@ class MainWindow(QMainWindow):
         self.panel_timeline.tracks_canvas.state_changed.connect(self.mark_unsaved)
 
     def mark_unsaved(self):
-        """Called whenever the timeline changes. Respects auto-save toggle setting."""
+        """Called whenever the timeline changes. Marks as dirty, uses debounced save."""
         if not self.is_dirty:
             self.is_dirty = True
             self.title_bar.set_saved_state(False)
             
-        # Trigger an immediate save if enabled
-        if app_config.get_setting("auto_save_enabled", True):
+        # Use a debounced delayed save (waits 3s after last change before saving)
+        if not hasattr(self, '_debounce_timer'):
+            self._debounce_timer = QTimer(self)
+            self._debounce_timer.setSingleShot(True)
+            self._debounce_timer.timeout.connect(self._debounced_save)
+        self._debounce_timer.start(3000)  # 3 seconds after last change
+
+    def _debounced_save(self):
+        """Saves after a quiet period of no changes."""
+        if self.is_dirty and app_config.get_setting("auto_save_enabled", True):
             self.save_current_project()
 
     def auto_save_project(self):

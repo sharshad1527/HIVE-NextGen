@@ -1,0 +1,10 @@
+{
+    "name": "Slide",
+    "icon": "mdi6.transition",
+    "category": "transitions",
+    "properties": {
+        "duration": {"type": "slider", "min": 5, "max": 60, "default": 15, "suffix": " frames"},
+        "direction": {"type": "combo", "options": ["Left", "Right", "Up", "Down"], "default": "Left"},
+        "easing": {"type": "combo", "options": ["Linear", "Ease In", "Ease Out", "Ease In-Out"], "default": "Ease In-Out"}
+    }
+}

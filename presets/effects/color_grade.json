@@ -1,0 +1,12 @@
+{
+    "name": "Color Grade",
+    "icon": "mdi6.palette-outline",
+    "category": "effects",
+    "properties": {
+        "brightness": {"type": "slider", "min": -100, "max": 100, "default": 0, "suffix": ""},
+        "contrast": {"type": "slider", "min": -100, "max": 100, "default": 10, "suffix": ""},
+        "saturation": {"type": "slider", "min": -100, "max": 100, "default": 15, "suffix": ""},
+        "temperature": {"type": "slider", "min": -100, "max": 100, "default": 0, "suffix": ""},
+        "tint": {"type": "color", "default": "#FFFFFF"}
+    }
+}

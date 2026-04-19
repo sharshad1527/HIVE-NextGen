@@ -39,6 +39,7 @@ class TracksCanvas(QWidget):
         super().__init__(parent)
         self.setAcceptDrops(True)
         
+        self._initialized = False  # Guard: prevents sync_to_project before project is loaded
         self.zoom_factor = 1.0
         self.max_logical_width = 0
         self.logical_playhead = 0.0 
@@ -106,7 +107,9 @@ class TracksCanvas(QWidget):
         self._cleanup_empty_tracks()
         self._apply_magnetic_v1()
         self.update_max_width()
-        self.save_state()
+        # NOTE: Do NOT call save_state() here — it would call sync_to_project()
+        # and overwrite the loaded project's tracks with empty items before
+        # load_from_project has a chance to populate self.items.
 
         global_signals.waveform_ready.connect(self._on_waveform_ready)
 
@@ -237,6 +240,7 @@ class TracksCanvas(QWidget):
                     if item["type"] in ["audio", "video"] and item["file_path"]:
                         media_manager.request_waveform(item["file_path"])
                     
+        self._initialized = True  # Now safe to sync_to_project
         self._cleanup_empty_tracks()
         self._apply_magnetic_v1()
         self.update_max_width()
@@ -247,6 +251,8 @@ class TracksCanvas(QWidget):
         """Packs current visual timeline blocks back into the backend Brain."""
         if not project_manager.current_project:
             return
+        if not self._initialized:
+            return  # Guard: skip syncing empty items before project is loaded
             
         new_tracks = []
         track_map = {}
@@ -265,11 +271,21 @@ class TracksCanvas(QWidget):
             for item in track_map.get(t_id, []):
                 # Clean out UI-only objects (like inf floats/waveforms) that crash MsgPack saving
                 metadata = {}
+                skip_keys = {"id", "track", "type", "text", "file_path", "x", "w", "visual_y", "waveform"}
                 for k, v in item.items():
-                    if k not in ["id", "track", "type", "text", "file_path", "x", "w", "visual_y", "waveform"]:
-                        metadata[k] = v
+                    if k in skip_keys:
+                        continue
+                    # Filter out float('inf') which crashes msgpack
+                    if isinstance(v, float) and (v == float('inf') or v == float('-inf') or v != v):
+                        continue
+                    metadata[k] = v
                 
                 actual_file_path = item.get("file_path", item.get("text", ""))
+                
+                # For captions, preserve the text in applied_effects
+                if item.get("type") == "caption":
+                    if "text" not in metadata:
+                        metadata["text"] = item.get("text", "New Caption")
                 
                 clips.append(ClipData(
                     clip_id=item["id"],
@@ -293,15 +309,24 @@ class TracksCanvas(QWidget):
     def _emit_selection_state(self):
         if not self.selected_ids:
             self.item_clicked.emit("", "", {})
+            global_signals.clip_deselected.emit()
         elif len(self.selected_ids) > 1:
             self.item_clicked.emit("multiple", "", {})
+            global_signals.clip_deselected.emit()
         else:
             item_id = list(self.selected_ids)[0]
             item = next((i for i in self.items if i["id"] == item_id), None)
             if item:
-                self.item_clicked.emit(self.selected_item_type, item["id"], copy.deepcopy(item))
+                # BUG 3 FIX: When user clicked a sub-element (transition/effect badge),
+                # emit the sub-type so the Properties Panel shows the correct page.
+                emit_type = self.selected_item_type
+                if emit_type not in ["transition_in", "transition_out", "clip_effect"]:
+                    emit_type = item["type"]
+                self.item_clicked.emit(emit_type, item["id"], copy.deepcopy(item))
+                global_signals.clip_selected.emit(emit_type, item["id"])
             else:
                 self.item_clicked.emit("", "", {})
+                global_signals.clip_deselected.emit()
 
     def update_item_property(self, item_id, prop_name, new_value):
         if prop_name == "apply_transition_to_all":
@@ -324,6 +349,9 @@ class TracksCanvas(QWidget):
                 self.update()
                 self.save_state()
                 break
+        
+        # Force the preview player to re-render with the updated property
+        global_signals.clip_transform_changed.emit(item_id, prop_name, new_value)
 
     # --- DRAG AND DROP ---
     def _get_track_group(self, track_id):
@@ -409,13 +437,26 @@ class TracksCanvas(QWidget):
             elif target_track_group == "effect":
                 ty, th = self.get_track_y(target_track)
                 w = 300
-                self._drop_target_rect = QRect(int(logical_x * z), ty, w, th)
-                self._drop_target_type = "track"
+                
+                # Check if we are near the edge to insert between tracks
+                if pos.y() < ty + 10:
+                    self._drop_target_rect = QRect(0, ty - 2, 9999, 4)
+                    self._drop_target_type = "track_insert"
+                    self._drop_target_insert_index = next((i for i, t in enumerate(self.track_defs) if t["id"] == target_track), 0)
+                elif pos.y() > ty + th - 10:
+                    self._drop_target_rect = QRect(0, ty + th - 2, 9999, 4)
+                    self._drop_target_type = "track_insert"
+                    self._drop_target_insert_index = next((i for i, t in enumerate(self.track_defs) if t["id"] == target_track), 0) + 1
+                else:
+                    self._drop_target_rect = QRect(int(logical_x * z), ty, w, th)
+                    self._drop_target_type = "track"
+                    
                 event.acceptProposedAction()
             elif not target_track_group:
                 ty = 32 + sum(t["height"] for t in self.track_defs)
                 th = 48
                 w = 300
+                # If hovering below all tracks, we can create one at the very bottom
                 self._drop_target_rect = QRect(int(logical_x * z), ty, w, th)
                 self._drop_target_type = "track_new"
                 event.acceptProposedAction()
@@ -430,8 +471,19 @@ class TracksCanvas(QWidget):
             if target_track_group == expected_group:
                 ty, th = self.get_track_y(target_track)
                 w = 150 if drop_type == "caption" else 300
-                self._drop_target_rect = QRect(int(logical_x * z), ty, w, th)
-                self._drop_target_type = "track"
+                
+                # Interleaved track insertion logic
+                if pos.y() < ty + 10:
+                    self._drop_target_rect = QRect(0, ty - 2, 9999, 4)
+                    self._drop_target_type = "track_insert"
+                    self._drop_target_insert_index = next((i for i, t in enumerate(self.track_defs) if t["id"] == target_track), 0)
+                elif pos.y() > ty + th - 10:
+                    self._drop_target_rect = QRect(0, ty + th - 2, 9999, 4)
+                    self._drop_target_type = "track_insert"
+                    self._drop_target_insert_index = next((i for i, t in enumerate(self.track_defs) if t["id"] == target_track), 0) + 1
+                else:
+                    self._drop_target_rect = QRect(int(logical_x * z), ty, w, th)
+                    self._drop_target_type = "track"
                 event.acceptProposedAction()
             elif not target_track_group:
                 ty = 32 + sum(t["height"] for t in self.track_defs)
@@ -441,7 +493,19 @@ class TracksCanvas(QWidget):
                 self._drop_target_type = "track_new"
                 event.acceptProposedAction()
             else:
-                event.ignore()
+                # If hovering over a different group (e.g Effect over Video), allow inserting between!
+                ty, th = self.get_track_y(target_track) if target_track else (0, 0)
+                if target_track:
+                    if pos.y() < ty + (th / 2):
+                        self._drop_target_rect = QRect(0, ty - 2, 9999, 4)
+                        self._drop_target_insert_index = next((i for i, t in enumerate(self.track_defs) if t["id"] == target_track), 0)
+                    else:
+                        self._drop_target_rect = QRect(0, ty + th - 2, 9999, 4)
+                        self._drop_target_insert_index = next((i for i, t in enumerate(self.track_defs) if t["id"] == target_track), 0) + 1
+                    self._drop_target_type = "track_insert"
+                    event.acceptProposedAction()
+                else:
+                    event.ignore()
             
             self.update()
 
@@ -456,126 +520,152 @@ class TracksCanvas(QWidget):
             event.ignore()
             return
             
-        data = json.loads(event.mimeData().data("application/x-have-item").data().decode('utf-8'))
+        data_raw = json.loads(event.mimeData().data("application/x-have-item").data().decode('utf-8'))
         pos = event.position().toPoint()
         z = self.zoom_factor
         logical_x = pos.x() / z
         
-        drop_type = data.get("type")
-        title = data.get("title")
-        subtype = data.get("subtype")
-        file_path = data.get("file_path", "") 
+        batch = data_raw.pop("batch") if "batch" in data_raw else [data_raw]
+        base_x = logical_x
         
-        if drop_type == "transition" and self._drop_target_type == "transition":
-            item = next((i for i in self.items if i["id"] == self._drop_target_item), None)
-            if item:
-                trans_dur_frames = int(app_config.get_setting("default_transition_duration", 1.0) * 30)
-
-                if getattr(self, "_drop_target_edge", "left") == "left":
-                    item["transition_in"] = title
-                    item["transition_in_duration"] = trans_dur_frames
-                else:
-                    item["transition_out"] = title
-                    item["transition_out_duration"] = trans_dur_frames
-                self.save_state()
-                self._emit_selection_state()
-                
-        elif drop_type == "effect" and self._drop_target_type == "clip":
-            item = next((i for i in self.items if i["id"] == self._drop_target_item), None)
-            if item:
-                if "applied_effects" not in item:
-                    item["applied_effects"] = []
-                if isinstance(item["applied_effects"], list):
-                    item["applied_effects"].append(title)
-                else:
-                    item["applied_effects"] = [title]
-                self.save_state()
-                self._emit_selection_state()
-                
-        elif drop_type in ["media", "caption", "effect"] and self._drop_target_type in ["track", "track_new"]:
-            expected_group = "video" if subtype in ["video", "image"] else ("audio" if subtype == "audio" else ("caption" if drop_type == "caption" else "effect"))
-            target_track = self._get_track_at_y(pos.y())
+        for data in batch:
+            drop_type = data.get("type")
+            title = data.get("title")
+            subtype = data.get("subtype")
+            file_path = data.get("file_path", "") 
             
-            if not target_track or self._get_track_group(target_track) != expected_group:
+            if drop_type == "transition" and self._drop_target_type == "transition":
+                item = next((i for i in self.items if i["id"] == self._drop_target_item), None)
+                if item:
+                    trans_dur_frames = int(app_config.get_setting("default_transition_duration", 1.0) * 30)
+    
+                    if getattr(self, "_drop_target_edge", "left") == "left":
+                        item["transition_in"] = title
+                        item["transition_in_duration"] = trans_dur_frames
+                    else:
+                        item["transition_out"] = title
+                        item["transition_out_duration"] = trans_dur_frames
+                    self.save_state()
+                    self._emit_selection_state()
+                    
+            elif drop_type == "effect" and self._drop_target_type == "clip":
+                item = next((i for i in self.items if i["id"] == self._drop_target_item), None)
+                if item:
+                    if "applied_effects" not in item:
+                        item["applied_effects"] = []
+                    if isinstance(item["applied_effects"], list):
+                        item["applied_effects"].append(title)
+                    else:
+                        item["applied_effects"] = [title]
+                    self.save_state()
+                    self._emit_selection_state()
+                    
+            elif drop_type in ["media", "caption", "effect"] and self._drop_target_type in ["track", "track_new", "track_insert"]:
+                expected_group = "video" if subtype in ["video", "image"] else ("audio" if subtype == "audio" else ("caption" if drop_type == "caption" else "effect"))
+                
                 target_track = None
-                for t in self.track_defs:
-                    if t["group"] == expected_group:
-                        target_track = t["id"]
-                        break
-                if not target_track: target_track = f"{expected_group}_1"
-
-            display_text = os.path.basename(file_path) if file_path else (title if title else "New Item")
-
-            item_w = 1000
-            max_w = float('inf')
-            
-            if data.get("duration"):
-                item_w = int(float(data.get("duration")) * 100)
-                if subtype in ["video", "audio"]: max_w = item_w
-            elif drop_type == "caption":
-                item_w = 400
-            elif drop_type == "effect":
-                item_w = 1500
-            elif subtype == "image":
-                item_w = int(app_config.get_setting("default_image_duration", 5.0) * 100)
-            elif subtype in ["video", "audio"] and file_path:
-                duration_sec = 0
-                # 1. Try native wave module for flawless .wav parsing
-                if file_path.lower().endswith('.wav'):
-                    try:
-                        import wave
-                        with wave.open(file_path, 'rb') as w_file:
-                            duration_sec = w_file.getnframes() / float(w_file.getframerate())
-                    except Exception:
-                        pass
                 
-                # 2. Try OpenCV FFmpeg backend for .mp3, .m4a, and .mp4 videos
-                if duration_sec <= 0 and CV2_AVAILABLE:
-                    try:
-                        cap = cv2.VideoCapture(file_path)
-                        fps = cap.get(cv2.CAP_PROP_FPS)
-                        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                        if fps > 0:
-                            duration_sec = frames / fps
-                        cap.release()
-                    except Exception:
-                        pass
-                        
-                if duration_sec > 0:
-                    item_w = int(duration_sec * 100)
-                    max_w = item_w
+                if self._drop_target_type == "track_insert":
+                    target_track = f"{expected_group}_{random.randint(10000, 99999)}"
+                    # Pre-insert a dummy def so `_cleanup_empty_tracks` preserves position
+                    idx = getattr(self, "_drop_target_insert_index", len(self.track_defs))
+                    self.track_defs.insert(idx, {"id": target_track, "group": expected_group, "label": "New", "icon": "", "height": 48})
+                elif self._drop_target_type == "track":
+                    target_track = self._get_track_at_y(pos.y())
+                
+                if not target_track or self._get_track_group(target_track) != expected_group:
+                    target_track = None
+                    for t in self.track_defs:
+                        if t["group"] == expected_group:
+                            target_track = t["id"]
+                            break
+                    if not target_track: target_track = f"{expected_group}_1"
 
-            new_item = {
-                "id": f"{drop_type}_{random.randint(10000, 99999)}",
-                "track": target_track,
-                "type": subtype if drop_type == "media" else drop_type,
-                "text": "New Caption" if drop_type == "caption" else display_text,
-                "file_path": file_path, 
-                "x": logical_x,
-                "w": item_w,
-                "max_w": max_w,
-                "source_in": 0
-            }
-            
-            if target_track != "video_1" or not self.v1_gravity_enabled:
-                track_items = [i for i in self.items if i["track"] == target_track]
-                while True:
-                    overlap = False
-                    for i in track_items:
-                        if new_item["x"] < i["x"] + i["w"] and new_item["x"] + new_item["w"] > i["x"]:
-                            overlap = True
-                            new_item["x"] = i["x"] + i["w"] 
-                    if not overlap:
-                        break
+                display_text = os.path.basename(file_path) if file_path else (title if title else "New Item")
+    
+                item_w = 1000
+                max_w = float('inf')
+                
+                if data.get("duration"):
+                    item_w = int(float(data.get("duration")) * 100)
+                    if subtype in ["video", "audio"]: max_w = item_w
+                elif drop_type == "caption":
+                    item_w = 400
+                elif drop_type == "effect":
+                    item_w = 1500
+                elif subtype == "image":
+                    item_w = int(app_config.get_setting("default_image_duration", 5.0) * 100)
+                elif subtype in ["video", "audio"] and file_path:
+                    duration_sec = 0
+                    # 1. Try native wave module for flawless .wav parsing
+                    if file_path.lower().endswith('.wav'):
+                        try:
+                            import wave
+                            with wave.open(file_path, 'rb') as w_file:
+                                duration_sec = w_file.getnframes() / float(w_file.getframerate())
+                        except Exception:
+                            pass
+                    
+                    # 2. Try OpenCV FFmpeg backend for .mp3, .m4a, and .mp4 videos
+                    if duration_sec <= 0 and CV2_AVAILABLE:
+                        try:
+                            cap = cv2.VideoCapture(file_path)
+                            fps = cap.get(cv2.CAP_PROP_FPS)
+                            frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                            if fps > 0:
+                                duration_sec = frames / fps
+                            cap.release()
+                        except Exception:
+                            pass
+                            
+                    if duration_sec > 0:
+                        item_w = int(duration_sec * 100)
+                        max_w = item_w
+    
+                new_item = {
+                    "id": f"{drop_type}_{random.randint(10000, 99999)}",
+                    "track": target_track,
+                    "type": subtype if drop_type == "media" else drop_type,
+                    "text": "New Caption" if drop_type == "caption" else display_text,
+                    "file_path": file_path, 
+                    "x": base_x,
+                    "w": item_w,
+                    "max_w": max_w,
+                    "source_in": 0
+                }
+                
+                # Merge preset properties from JSON-based presets (effects, captions, transitions)
+                preset_props = data.get("preset_properties", {})
+                if preset_props:
+                    from core.preset_loader import get_default_properties
+                    defaults = get_default_properties({"properties": preset_props})
+                    for k, v in defaults.items():
+                        new_item[k] = v
+                    # Store the preset name for reference
+                    new_item["preset_name"] = title
+                
+                if target_track != "video_1" or not self.v1_gravity_enabled:
+                    track_items = [i for i in self.items if i["track"] == target_track]
+                    while True:
+                        overlap = False
+                        for i in track_items:
+                            if new_item["x"] < i["x"] + i["w"] and new_item["x"] + new_item["w"] > i["x"]:
+                                overlap = True
+                                new_item["x"] = i["x"] + i["w"] 
+                        if not overlap:
+                            break
+    
+                self.items.append(new_item)
+                if new_item["type"] in ["audio", "video"] and new_item["file_path"]:
+                    media_manager.request_waveform(new_item["file_path"])
+                    
+                # Increment base_x for the next item in the batch
+                base_x += item_w
 
-            self.items.append(new_item)
-            if new_item["type"] in ["audio", "video"] and new_item["file_path"]:
-                media_manager.request_waveform(new_item["file_path"])
-
-            self._cleanup_empty_tracks()
-            self._apply_magnetic_v1()
-            self.update_max_width()
-            self.save_state()
+        self._cleanup_empty_tracks()
+        self._apply_magnetic_v1()
+        self.update_max_width()
+        self.save_state()
             
         self._drop_target_rect = None
         self._drop_target_type = None
@@ -614,28 +704,31 @@ class TracksCanvas(QWidget):
         
         self.state_changed.emit()
         
-    def add_item_directly(self, data):
+    def add_item_directly(self, data_raw):
         """Handles the + button clicking from Workspace to shoot items into correct tracks immediately."""
-        drop_type = data.get("type")
-        subtype = data.get("subtype")
-        title = data.get("title")
-        file_path = data.get("file_path", "")
-
-        if not drop_type:
-            return
-
-        expected_group = "video" if subtype in ["video", "image"] else ("audio" if subtype == "audio" else ("caption" if drop_type == "caption" else "effect"))
-
-        target_track = None
-        for t in self.track_defs:
-            if t["group"] == expected_group:
-                target_track = t["id"]
-                break
-        if not target_track:
-            target_track = f"{expected_group}_1"
-
-        display_text = os.path.basename(file_path) if file_path else (title if title else "New Item")
-        logical_x = self.logical_playhead
+        batch = data_raw.pop("batch") if "batch" in data_raw else [data_raw]
+        base_x = self.logical_playhead
+        
+        for data in batch:
+            drop_type = data.get("type")
+            subtype = data.get("subtype")
+            title = data.get("title")
+            file_path = data.get("file_path", "")
+    
+            if not drop_type:
+                continue
+    
+            expected_group = "video" if subtype in ["video", "image"] else ("audio" if subtype == "audio" else ("caption" if drop_type == "caption" else "effect"))
+    
+            target_track = None
+            for t in self.track_defs:
+                if t["group"] == expected_group:
+                    target_track = t["id"]
+                    break
+            if not target_track:
+                target_track = f"{expected_group}_1"
+    
+            display_text = os.path.basename(file_path) if file_path else (title if title else "New Item")
         
         item_w = 1000
         max_w = float('inf')
@@ -676,33 +769,36 @@ class TracksCanvas(QWidget):
                 item_w = int(duration_sec * 100)
                 max_w = item_w
 
-        new_item = {
-            "id": f"{drop_type}_{random.randint(10000, 99999)}",
-            "track": target_track,
-            "type": subtype if drop_type == "media" else drop_type,
-            "text": "New Caption" if drop_type == "caption" else display_text,
-            "file_path": file_path,
-            "x": logical_x,
-            "w": item_w,
-            "max_w": max_w,
-            "source_in": 0
-        }
+            new_item = {
+                "id": f"{drop_type}_{random.randint(10000, 99999)}",
+                "track": target_track,
+                "type": subtype if drop_type == "media" else drop_type,
+                "text": "New Caption" if drop_type == "caption" else display_text,
+                "file_path": file_path,
+                "x": base_x,
+                "w": item_w,
+                "max_w": max_w,
+                "source_in": 0
+            }
 
-        if target_track != "video_1" or not self.v1_gravity_enabled:
-            track_items = [i for i in self.items if i["track"] == target_track]
-            while True:
-                overlap = False
-                for i in track_items:
-                    if new_item["x"] < i["x"] + i["w"] and new_item["x"] + new_item["w"] > i["x"]:
-                        overlap = True
-                        new_item["x"] = i["x"] + i["w"]
-                if not overlap:
-                    break
-
-        self.items.append(new_item)
-        if new_item["type"] in ["audio", "video"] and new_item["file_path"]:
-            media_manager.request_waveform(new_item["file_path"])
-
+            if target_track != "video_1" or not self.v1_gravity_enabled:
+                track_items = [i for i in self.items if i["track"] == target_track]
+                while True:
+                    overlap = False
+                    for i in track_items:
+                        if new_item["x"] < i["x"] + i["w"] and new_item["x"] + new_item["w"] > i["x"]:
+                            overlap = True
+                            new_item["x"] = i["x"] + i["w"]
+                    if not overlap:
+                        break
+    
+            self.items.append(new_item)
+            if new_item["type"] in ["audio", "video"] and new_item["file_path"]:
+                media_manager.request_waveform(new_item["file_path"])
+                
+            base_x += item_w
+            
+        # Run cleanup outside the batch loop
         self._cleanup_empty_tracks()
         self._apply_magnetic_v1()
         self.update_max_width()
@@ -928,6 +1024,11 @@ class TracksCanvas(QWidget):
         self.playhead_changed.emit(self.logical_playhead)
         self.update()
 
+    def _would_v1_be_empty(self, excluding_ids=None):
+        """Check if V1 would become empty if the given clip IDs were removed/moved."""
+        excluding = excluding_ids or set()
+        return not any(i for i in self.items if i["track"] == "video_1" and i["id"] not in excluding)
+
     def delete_selected_item(self):
         if not self.selected_ids:
             return
@@ -955,6 +1056,15 @@ class TracksCanvas(QWidget):
                         to_delete.add(i["id"])
 
         if to_delete:
+            # BUG 2 FIX: Never let V1 become empty — block deletion if it would empty V1
+            v1_remaining = [i for i in self.items if i["track"] == "video_1" and i["id"] not in to_delete]
+            if not v1_remaining:
+                # Check if ANY items are V1 items being deleted
+                v1_deleting = [i for i in self.items if i["track"] == "video_1" and i["id"] in to_delete]
+                if v1_deleting:
+                    print("V1 Protection: Cannot delete — at least one clip must remain on V1.")
+                    return
+            
             self.items = [i for i in self.items if i["id"] not in to_delete]
             self.selected_ids.difference_update(to_delete)
             if not self.selected_ids:
@@ -1003,50 +1113,56 @@ class TracksCanvas(QWidget):
         self.update()
 
     def _cleanup_empty_tracks(self):
-        active_by_group = {"video": set(), "audio": set(), "caption": set(), "effect": set(), "word": {"word_1"}}
+        active_track_ids = set()
         for item in self.items:
-            prefix = item["track"].split("_")[0]
-            if prefix in active_by_group:
-                active_by_group[prefix].add(item["track"])
-        
-        active_by_group["video"].add("video_1")
-        active_by_group["audio"].add("audio_1")
-        active_by_group["caption"].add("caption_1")
-        active_by_group["effect"].add("effect_1")
-        
-        new_defs = []
-        track_mapping = {} 
-        group_order = ["effect", "caption", "video", "audio", "word"]
-        
-        for group in group_order:
-            sorted_old_tracks = sorted(list(active_by_group[group]), key=lambda x: int(x.split('_')[1]))
-            for i, old_id in enumerate(sorted_old_tracks):
-                new_id = f"{group}_{i + 1}"
-                track_mapping[old_id] = new_id
+            active_track_ids.add(item["track"])
+            
+        # Ensure base tracks always exist
+        for base in ["video_1", "audio_1", "caption_1", "effect_1", "word_1"]:
+            active_track_ids.add(base)
+            
+        ordered_active = []
+        for t in self.track_defs:
+            if t["id"] in active_track_ids:
+                ordered_active.append(t["id"])
                 
-            if group in ["effect", "caption", "video"]:
-                for i in reversed(range(len(sorted_old_tracks))):
-                    new_num = i + 1
-                    new_id = f"{group}_{new_num}"
-                    label_prefix = group.capitalize()
-                    if group == "video": label_prefix = "V"
-                    elif group == "effect": label_prefix = "Effects "
-                    label = f"{label_prefix}{new_num}" if new_num > 1 else (f"{label_prefix}1 - Main" if group=="video" else f"{label_prefix} 1")
-                    if group == "caption" and new_num == 1: label = "Captions"
-                    icon = "mdi6.auto-fix"
-                    if group == "caption": icon = "mdi6.comment-text-outline"
-                    if group == "video": icon = "mdi6.movie-open-outline"
-                    height = 80 if group == "video" else 48 # INCREASED TO 80 FOR VIDEO TRACKS
-                    new_defs.append({"id": new_id, "group": group, "label": label, "icon": icon, "height": height})
-            else:
-                for i in range(len(sorted_old_tracks)):
-                    new_num = i + 1
-                    new_id = f"{group}_{new_num}"
-                    label = f"A{new_num}" if group == "audio" else "Words"
-                    if group == "audio" and new_num == 1: label = "A1 - Voice"
-                    icon = "mdi6.volume-high" if group == "audio" else "mdi6.format-text"
-                    height = 64 if group == "audio" else 48
-                    new_defs.append({"id": new_id, "group": group, "label": label, "icon": icon, "height": height})
+        # Append any track IDs that weren't inside track_defs (extremely new tracks)
+        for tid in active_track_ids:
+            if tid not in ordered_active:
+                ordered_active.append(tid)
+
+        group_counts = {"video": 0, "audio": 0, "caption": 0, "effect": 0, "word": 0}
+        new_defs = []
+        track_mapping = {}
+
+        # Re-number the active tracks top-to-bottom sequentially
+        for old_id in ordered_active:
+            group = old_id.split("_")[0]
+            group_counts[group] += 1
+            new_num = group_counts[group]
+            new_id = f"{group}_{new_num}"
+            track_mapping[old_id] = new_id
+
+            label_prefix = group.capitalize()
+            if group == "video": label_prefix = "V"
+            elif group == "effect": label_prefix = "Effects "
+            elif group == "audio": label_prefix = "A"
+            
+            label = f"{label_prefix}{new_num}"
+            if new_num == 1:
+                if group == "video": label = "V1 - Main"
+                elif group == "audio": label = "A1 - Voice"
+                elif group == "caption": label = "Captions"
+                elif group == "effect": label = "Effects 1"
+                
+            icon = "mdi6.auto-fix"
+            if group == "caption": icon = "mdi6.comment-text-outline"
+            elif group == "video": icon = "mdi6.movie-open-outline"
+            elif group == "audio": icon = "mdi6.volume-high"
+            elif group == "word": icon = "mdi6.format-text"
+            
+            height = 80 if group == "video" else (64 if group == "audio" else 48)
+            new_defs.append({"id": new_id, "group": group, "label": label, "icon": icon, "height": height})
 
         for item in self.items:
             if item["track"] in track_mapping:
@@ -1096,7 +1212,10 @@ class TracksCanvas(QWidget):
             logical_x = physical_x / z
             y = event.position().y()
             
+            # BUG 1 FIX: Support Ctrl+click multi-select alongside Shift+click
             shift_held = bool(event.modifiers() & Qt.ShiftModifier)
+            ctrl_held = bool(event.modifiers() & Qt.ControlModifier)
+            multi_select = shift_held or ctrl_held
             
             self._click_physical_pos = event.position().toPoint()
             self._click_logical_x = logical_x
@@ -1114,7 +1233,7 @@ class TracksCanvas(QWidget):
                 self.update()
                 return
             
-            if self.active_tool == "pointer" and not shift_held:
+            if self.active_tool == "pointer" and not multi_select:
                 pass 
 
             for item in reversed(self.items):
@@ -1194,7 +1313,7 @@ class TracksCanvas(QWidget):
                                         self.update()
                                 return
 
-                            if shift_held:
+                            if multi_select:
                                 if item["id"] in self.selected_ids:
                                     self.selected_ids.remove(item["id"])
                                 else:
@@ -1230,7 +1349,7 @@ class TracksCanvas(QWidget):
                             return
 
             if self.active_tool == "pointer":
-                if shift_held:
+                if multi_select:
                     self.marquee_start = event.position().toPoint()
                     self.marquee_current = self.marquee_start
                     self.marquee_initial_selection = set(self.selected_ids)
@@ -1520,6 +1639,9 @@ class TracksCanvas(QWidget):
                             group = "video" if item["type"] in ["video", "image"] else item["type"]
                             group_tracks = [t for t in self.track_defs if t["group"] == group]
                             
+                            # Remember original track before reassignment for V1 protection
+                            track_before_drag = self.original_track
+                            
                             if group_tracks:
                                 matched = False
                                 for t in group_tracks:
@@ -1539,6 +1661,14 @@ class TracksCanvas(QWidget):
                                         item["track"] = f"{group}_{max_num + 1}"
                                     elif center_y > last_t_y + last_th and group == "audio":
                                         item["track"] = f"{group}_{max_num + 1}"
+
+                            # BUG 2 FIX: If clip was on V1 and is now moving away, check V1 protection
+                            if track_before_drag == "video_1" and item["track"] != "video_1":
+                                v1_remaining = [i for i in self.items if i["track"] == "video_1" and i["id"] != item["id"]]
+                                if not v1_remaining:
+                                    print("V1 Protection: Cannot move last clip from V1.")
+                                    item["track"] = "video_1"
+                                    item["x"] = self.original_x
 
                             if item["track"] != "video_1" or not self.v1_gravity_enabled:
                                 while True:
@@ -1594,6 +1724,11 @@ class TracksCanvas(QWidget):
                 painter.fillRect(self._drop_target_rect, QColor(255, 255, 255, 20))
                 painter.setPen(QPen(QColor(230, 107, 44, 150), 2, Qt.DashLine))
                 painter.drawRect(self._drop_target_rect)
+            elif self._drop_target_type == "track_insert":
+                painter.fillRect(self._drop_target_rect, QColor(230, 107, 44, 255))
+                painter.setPen(QPen(QColor(255, 255, 255, 200), 2))
+                y_center = self._drop_target_rect.top() + 2
+                painter.drawLine(0, y_center, self.width(), y_center)
 
         painter.setPen(QPen(QColor("#1f1f1f"), 1))
         current_y = 32

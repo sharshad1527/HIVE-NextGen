@@ -1,0 +1,16 @@
+{
+    "name": "Pop-up",
+    "icon": "mdi6.message-text-outline",
+    "category": "captions",
+    "properties": {
+        "font_family": {"type": "combo", "options": ["Roboto", "Arial", "Sour Gummy", "Montserrat", "Inter", "Poppins"], "default": "Sour Gummy"},
+        "font_size": {"type": "slider", "min": 10, "max": 200, "default": 64, "suffix": ""},
+        "text_color": {"type": "color", "default": "#FFFFFF"},
+        "bg_color": {"type": "color", "default": "#E66B2C"},
+        "bg_opacity": {"type": "slider", "min": 0, "max": 100, "default": 90, "suffix": "%"},
+        "bg_radius": {"type": "slider", "min": 0, "max": 50, "default": 12, "suffix": "px"},
+        "bg_padding": {"type": "slider", "min": 0, "max": 50, "default": 16, "suffix": "px"},
+        "position_y": {"type": "slider", "min": -500, "max": 500, "default": 300, "suffix": "px"},
+        "animation": {"type": "combo", "options": ["None", "Scale In", "Bounce", "Fade In"], "default": "Scale In"}
+    }
+}

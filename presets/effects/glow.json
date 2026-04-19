@@ -1,0 +1,10 @@
+{
+    "name": "Cinematic Glow",
+    "icon": "mdi6.white-balance-sunny",
+    "category": "effects",
+    "properties": {
+        "intensity": {"type": "slider", "min": 0, "max": 100, "default": 60, "suffix": "%"},
+        "radius": {"type": "slider", "min": 1, "max": 200, "default": 30, "suffix": "px"},
+        "color_tint": {"type": "color", "default": "#FFD700"}
+    }
+}

@@ -5,8 +5,8 @@ import os
 import shutil
 from PySide6.QtWidgets import (QFrame, QVBoxLayout, QHBoxLayout, QPushButton, 
                                QLabel, QStackedWidget, QWidget, QScrollArea, 
-                               QGridLayout, QLineEdit, QComboBox, QFileDialog, QProgressBar, QDialog, QCheckBox)
-from PySide6.QtCore import Qt, QMimeData, Signal, QThread
+                               QGridLayout, QLineEdit, QComboBox, QFileDialog, QProgressBar, QDialog, QCheckBox, QRubberBand)
+from PySide6.QtCore import Qt, QMimeData, Signal, QThread, QPoint, QRect, QSize
 from PySide6.QtGui import QDrag, QPixmap
 
 from core.media_manager import media_manager
@@ -47,9 +47,35 @@ class MediaLoaderThread(QThread):
                 
         self.finished_all.emit()
 
+class MediaGridWidget(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.rubber_band = QRubberBand(QRubberBand.Rectangle, self)
+        self.origin = QPoint()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.origin = event.position().toPoint()
+            self.rubber_band.setGeometry(QRect(self.origin, QSize()))
+            self.rubber_band.show()
+
+    def mouseMoveEvent(self, event):
+        if not self.origin.isNull():
+            rect = QRect(self.origin, event.position().toPoint()).normalized()
+            self.rubber_band.setGeometry(rect)
+            for card in self.findChildren(DraggableCard):
+                card.is_selected = rect.intersects(card.geometry())
+                card.setStyleSheet(card.selected_style if card.is_selected else card.default_style)
+            
+    def mouseReleaseEvent(self, event):
+        self.rubber_band.hide()
+        self.origin = QPoint()
+
 class DraggableCard(QFrame):
     add_requested = Signal(dict)
     preview_requested = Signal(dict)
+    card_clicked = Signal(object, object)
+    folder_double_clicked = Signal(str)
 
     def __init__(self, title, icon_name, item_type, subtype="", file_path="", thumbnail=None):
         super().__init__()
@@ -63,10 +89,16 @@ class DraggableCard(QFrame):
         self.setFixedSize(145, 120) 
         self.setCursor(Qt.PointingHandCursor)
         
-        self.setStyleSheet("""
+        self.is_selected = False
+        self.default_style = """
             QFrame { background-color: rgba(26, 26, 26, 0.6); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 8px; }
             QFrame:hover { border: 1px solid rgba(230, 107, 44, 0.5); }
-        """)
+        """
+        self.selected_style = """
+            QFrame { background-color: rgba(26, 26, 26, 0.6); border: 2px solid #e66b2c; border-radius: 8px; }
+            QFrame:hover { border: 2px solid #e66b2c; }
+        """
+        self.setStyleSheet(self.default_style)
         
         layout = QVBoxLayout(self)
         layout.setContentsMargins(5, 5, 5, 5)
@@ -148,12 +180,39 @@ class DraggableCard(QFrame):
             "thumbnail": self.thumbnail_path
         }
 
+    def get_selected_siblings(self):
+        try:
+            parent_widget = self.parent()
+            while parent_widget and not hasattr(parent_widget, "layout"):
+                parent_widget = parent_widget.parent()
+            
+            if parent_widget and parent_widget.layout():
+                layout = parent_widget.layout()
+                siblings = []
+                for i in range(layout.count()):
+                    widget = layout.itemAt(i).widget()
+                    if isinstance(widget, DraggableCard) and getattr(widget, "is_selected", False):
+                        siblings.append(widget.get_data())
+                return siblings
+        except Exception:
+            pass
+        return []
+
     def _on_add_clicked(self):
-        self.add_requested.emit(self.get_data())
+        siblings = self.get_selected_siblings()
+        if not self.is_selected or not siblings:
+            self.add_requested.emit(self.get_data())
+        else:
+            self.add_requested.emit({"batch": siblings})
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.drag_start_pos = event.position().toPoint()
+            self.card_clicked.emit(self, event.modifiers())
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton and self.item_type == "folder":
+            self.folder_double_clicked.emit(self.file_path)
 
     def mouseMoveEvent(self, event):
         if not (event.buttons() & Qt.LeftButton) or not self.drag_start_pos:
@@ -163,7 +222,13 @@ class DraggableCard(QFrame):
             
         drag = QDrag(self)
         mime = QMimeData()
-        data = json.dumps(self.get_data())
+        
+        siblings = self.get_selected_siblings()
+        if self.is_selected and len(siblings) > 1:
+            data = json.dumps({"batch": siblings})
+        else:
+            data = json.dumps(self.get_data())
+            
         mime.setData("application/x-have-item", data.encode('utf-8'))
         drag.setMimeData(mime)
         
@@ -319,7 +384,9 @@ class WorkspacePanel(QFrame):
         self.media_row = 0
         self.media_col = 0
         self.active_threads = set() 
-        self.media_cards = {} 
+        self.media_cards = {}
+        self.current_folder_path = None
+        self.last_clicked_card = None
         
         self.setStyleSheet("""
             QFrame#Panel {
@@ -416,10 +483,10 @@ class WorkspacePanel(QFrame):
             QScrollBar::handle:vertical { background: #333; border-radius: 3px; }
             QScrollBar::handle:vertical:hover { background: #555; }
         """)
-        content = QWidget()
+        content = MediaGridWidget(self)
         content.setStyleSheet("background: transparent;")
         grid = QGridLayout(content)
-        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setContentsMargins(10, 10, 10, 10)
         grid.setSpacing(10)
         grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
         scroll.setWidget(content)
@@ -605,8 +672,15 @@ class WorkspacePanel(QFrame):
         btn_import_folder.setCursor(Qt.PointingHandCursor)
         btn_import_folder.clicked.connect(self._import_folder)
         
+        self.btn_media_up = QPushButton(qta.icon('mdi6.arrow-up-left', color='#d1d1d1'), "")
+        self.btn_media_up.setStyleSheet("QPushButton { background: transparent; border: none; font-weight: bold; } QPushButton:hover { color: #ffffff; }")
+        self.btn_media_up.setCursor(Qt.PointingHandCursor)
+        self.btn_media_up.clicked.connect(self._navigate_media_up)
+        self.btn_media_up.hide()
+        
         import_layout.addWidget(btn_import_files, stretch=2)
         import_layout.addWidget(btn_import_folder, stretch=1)
+        import_layout.addWidget(self.btn_media_up)
         layout.addLayout(import_layout)
 
         search = QLineEdit()
@@ -629,8 +703,18 @@ class WorkspacePanel(QFrame):
 
     def load_media_bin_from_paths(self, paths):
         self.clear_media_bin()
-        # Ensure we don't duplicate copying operations on startup
-        self._process_media_files_async(paths, False, None)
+        self.current_folder_path = None
+        self.btn_media_up.hide()
+        
+        folders_added = set()
+        for p in paths:
+            if os.path.exists(p) and os.path.isdir(p):
+                folders_added.add(p)
+                self._add_folder_card(p)
+                
+        # Now process files that are direct children or flat
+        files_to_process = [p for p in paths if os.path.exists(p) and not os.path.isdir(p)]
+        self._process_media_files_async(files_to_process, False, None)
 
     def _import_media_files(self):
         file_paths, _ = QFileDialog.getOpenFileNames(
@@ -643,17 +727,70 @@ class WorkspacePanel(QFrame):
     def _import_folder(self):
         folder_path = QFileDialog.getExistingDirectory(self, "Import Media Folder")
         if folder_path and project_manager.current_project:
-            new_paths = []
-            valid_exts = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.wav', '.mp3', '.aac', '.png', '.jpg', '.jpeg', '.webp'}
+            if folder_path not in project_manager.current_project.media_bin:
+                project_manager.current_project.media_bin.append(folder_path)
+                project_manager.save_project()
+                
+            if not self.current_folder_path:
+                self._add_folder_card(folder_path)
+            else:
+                self._refresh_media_view()
+
+    def _navigate_media_up(self):
+        if self.current_folder_path:
+            parent = os.path.dirname(self.current_folder_path)
+            # If the parent is the root of an imported folder, or top-level
+            if any(p.startswith(parent) for p in project_manager.current_project.media_bin):
+                self.current_folder_path = parent if parent in project_manager.current_project.media_bin else None
+            else:
+                self.current_folder_path = None
+            self._refresh_media_view()
+
+    def _refresh_media_view(self):
+        self.clear_media_bin()
+        if self.current_folder_path:
+            self.btn_media_up.show()
+            self._render_directory(self.current_folder_path)
+        else:
+            self.btn_media_up.hide()
+            self.load_media_bin_from_paths(project_manager.current_project.media_bin)
             
-            for root, _, files in os.walk(folder_path):
-                for f in files:
+    def _render_directory(self, dir_path):
+        new_paths = []
+        valid_exts = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.wav', '.mp3', '.aac', '.png', '.jpg', '.jpeg', '.webp'}
+        try:
+            for f in os.listdir(dir_path):
+                full_path = os.path.join(dir_path, f).replace('\\', '/')
+                if os.path.isdir(full_path):
+                    self._add_folder_card(full_path)
+                else:
                     ext = os.path.splitext(f)[1].lower()
                     if ext in valid_exts:
-                        new_paths.append(os.path.join(root, f).replace('\\', '/'))
-                        
-            if new_paths:
-                self._handle_media_import(new_paths)
+                        new_paths.append(full_path)
+        except Exception:
+            pass
+        if new_paths:
+            self._process_media_files_async(new_paths, False, None)
+
+    def _add_folder_card(self, folder_path):
+        card = DraggableCard(
+            title=os.path.basename(folder_path),
+            icon_name='mdi6.folder',
+            item_type='folder',
+            subtype='folder',
+            file_path=folder_path
+        )
+        card.card_clicked.connect(self._on_media_card_clicked)
+        card.folder_double_clicked.connect(self._on_folder_double_clicked)
+        self.media_grid.addWidget(card, self.media_row, self.media_col)
+        self.media_col += 1
+        if self.media_col > 1:
+            self.media_col = 0
+            self.media_row += 1
+
+    def _on_folder_double_clicked(self, folder_path):
+        self.current_folder_path = folder_path
+        self._refresh_media_view()
                 
     def _handle_media_import(self, file_paths):
         copy_enabled = app_config.get_setting("copy_media_to_project", False)
@@ -700,6 +837,7 @@ class WorkspacePanel(QFrame):
         )
         card.add_requested.connect(self.add_item_to_timeline.emit)
         card.preview_requested.connect(self.preview_requested.emit)
+        card.card_clicked.connect(self._on_media_card_clicked)
         
         self.media_cards[final_path] = card
 
@@ -718,6 +856,36 @@ class WorkspacePanel(QFrame):
                 on_fail_callback=self._handle_proxy_failed 
             )
 
+    def _on_media_card_clicked(self, card, modifiers):
+        all_cards = []
+        for i in range(self.media_grid.count()):
+            w = self.media_grid.itemAt(i).widget()
+            if isinstance(w, DraggableCard):
+                all_cards.append(w)
+                
+        if modifiers & Qt.ControlModifier:
+            card.is_selected = not card.is_selected
+            card.setStyleSheet(card.selected_style if card.is_selected else card.default_style)
+            self.last_clicked_card = card
+        elif modifiers & Qt.ShiftModifier and self.last_clicked_card:
+            try:
+                idx1 = all_cards.index(self.last_clicked_card)
+                idx2 = all_cards.index(card)
+                start, end = min(idx1, idx2), max(idx1, idx2)
+                for i in range(start, end + 1):
+                    all_cards[i].is_selected = True
+                    all_cards[i].setStyleSheet(all_cards[i].selected_style)
+            except ValueError:
+                pass
+        else:
+            for c in all_cards:
+                if c != card:
+                    c.is_selected = False
+                    c.setStyleSheet(c.default_style)
+            card.is_selected = True
+            card.setStyleSheet(card.selected_style)
+            self.last_clicked_card = card
+
     def _handle_proxy_progress(self, original_path, percentage):
         if original_path in self.media_cards:
             self.media_cards[original_path].update_proxy_progress(percentage)
@@ -733,6 +901,8 @@ class WorkspacePanel(QFrame):
             self.media_cards[original_path].update_proxy_progress(100)
 
     def _create_preset_tab(self, category, default_icon, placeholders):
+        from core.preset_loader import get_presets
+        
         widget = QWidget()
         layout = QVBoxLayout(widget)
         layout.setContentsMargins(15, 15, 15, 15)
@@ -757,16 +927,57 @@ class WorkspacePanel(QFrame):
         scroll, grid = self._create_grid_scroll()
         
         item_type_map = { "Captions": "caption", "Effects": "effect", "Transitions": "transition" }
+        category_folder_map = { "Captions": "captions", "Effects": "effects", "Transitions": "transitions" }
         item_type = item_type_map.get(category, "preset")
+        folder_name = category_folder_map.get(category, category.lower())
+
+        # Load presets from JSON files on disk
+        presets = get_presets(folder_name)
+        
+        # Fallback to hardcoded list if no JSON presets found
+        if not presets:
+            presets = [{"name": name, "icon": default_icon, "properties": {}} for name in placeholders]
 
         col_count = 2
-        for i, item_name in enumerate(placeholders):
+        all_cards = []
+        for i, preset in enumerate(presets):
             row = i // col_count
             col = i % col_count
-            card = DraggableCard(item_name, default_icon, item_type, item_name)
+            preset_name = preset.get("name", "Unnamed")
+            preset_icon = preset.get("icon", default_icon)
+            
+            card = DraggableCard(preset_name, preset_icon, item_type, preset_name)
+            # Attach full preset properties to card's data for pass-through on drop
+            card._preset_properties = preset.get("properties", {})
+            
+            # Override get_data to include preset properties
+            original_get_data = card.get_data
+            def make_enhanced_get_data(orig, props):
+                def enhanced_get_data():
+                    data = orig()
+                    data["preset_properties"] = props
+                    return data
+                return enhanced_get_data
+            card.get_data = make_enhanced_get_data(original_get_data, card._preset_properties)
+            
             card.add_requested.connect(self.add_item_to_timeline.emit)
             card.preview_requested.connect(self.preview_requested.emit)
             grid.addWidget(card, row, col)
+            all_cards.append(card)
+
+        # Wire search filtering
+        def filter_presets(text):
+            text_lower = text.lower()
+            row_idx, col_idx = 0, 0
+            for card in all_cards:
+                matches = text_lower in card.title.lower() if text_lower else True
+                card.setVisible(matches)
+                if matches:
+                    grid.removeWidget(card)
+                    grid.addWidget(card, row_idx // col_count, row_idx % col_count)
+                    row_idx += 1
+                    
+        search.textChanged.connect(filter_presets)
 
         layout.addWidget(scroll)
         return widget

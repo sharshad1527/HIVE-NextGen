@@ -1,0 +1,10 @@
+{
+    "name": "Zoom",
+    "icon": "mdi6.transition",
+    "category": "transitions",
+    "properties": {
+        "duration": {"type": "slider", "min": 5, "max": 60, "default": 15, "suffix": " frames"},
+        "scale": {"type": "slider", "min": 100, "max": 400, "default": 200, "suffix": "%"},
+        "easing": {"type": "combo", "options": ["Linear", "Ease In", "Ease Out", "Ease In-Out"], "default": "Ease Out"}
+    }
+}
