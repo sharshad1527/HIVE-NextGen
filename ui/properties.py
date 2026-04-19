@@ -64,7 +64,28 @@ class PropertiesPanel(QFrame):
         self.spinbox_style = """
             QSpinBox, QDoubleSpinBox {
                 background-color: #1f1f23; border: 1px solid #333338;
-                border-radius: 6px; color: #d1d1d1; padding: 4px 8px; font-family: 'Inter', sans-serif; font-size: 11px;
+                border-radius: 6px; color: #d1d1d1; padding: 4px 18px 4px 4px; font-family: 'Inter', sans-serif; font-size: 11px;
+            }
+            QSpinBox::up-button, QDoubleSpinBox::up-button {
+                subcontrol-origin: border; subcontrol-position: top right;
+                width: 14px; border-left: 1px solid #333338;
+                border-bottom: 1px solid #333338; border-top-right-radius: 4px; background: #2b2b30;
+            }
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                subcontrol-origin: border; subcontrol-position: bottom right;
+                width: 14px; border-left: 1px solid #333338;
+                border-bottom-right-radius: 4px; background: #2b2b30;
+            }
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+                background: #3a3a40;
+            }
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+                image: url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAiIGhlaWdodD0iNiIgdmlld0JveD0iMCAwIDEwIDYiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTUgMEwxMCA2SDBMNSAwWiIgZmlsbD0iI2QxZDFkMSIvPjwvc3ZnPg==');
+                width: 7px; height: 5px;
+            }
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+                image: url('data:image/svg+xml;base64,PHN2ZyB3aWR0aD0iMTAiIGhlaWdodD0iNiIgdmlld0JveD0iMCAwIDEwIDYiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHBhdGggZD0iTTUgNkwwIDBIMTBMNSA2WiIgZmlsbD0iI2QxZDFkMSIvPjwvc3ZnPg==');
+                width: 7px; height: 5px;
             }
         """
 
@@ -326,7 +347,7 @@ class PropertiesPanel(QFrame):
         row.addStretch()
 
         controls = QWidget()
-        controls.setFixedWidth(140)
+        controls.setFixedWidth(160)
         controls_layout = QHBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(8)
@@ -341,10 +362,9 @@ class PropertiesPanel(QFrame):
         spin.setValue(int(current))
         if suffix:
             spin.setSuffix(suffix if suffix.startswith(" ") else f" {suffix}")
-        spin.setFixedWidth(60)
-        spin.setButtonSymbols(QSpinBox.NoButtons)
+        spin.setFixedWidth(75)
         spin.setStyleSheet(self.spinbox_style)
-        spin.setAlignment(Qt.AlignCenter)
+        spin.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         
         # Cross-couple slider and spinbox
         slider.valueChanged.connect(spin.setValue)
@@ -383,10 +403,9 @@ class PropertiesPanel(QFrame):
         spin.setValue(float(current))
         spin.setSuffix(f" {suffix}" if suffix else "")
         spin.setDecimals(1)
-        spin.setFixedWidth(60)
-        spin.setButtonSymbols(QDoubleSpinBox.NoButtons)
+        spin.setFixedWidth(75)
         spin.setStyleSheet(self.spinbox_style)
-        spin.setAlignment(Qt.AlignCenter)
+        spin.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         spin.valueChanged.connect(lambda v, k=key: self._on_prop_change(k, v, commit=True))
 
@@ -409,7 +428,7 @@ class PropertiesPanel(QFrame):
         combo = QComboBox()
         combo.addItems(options)
         combo.setStyleSheet(self.combo_style)
-        combo.setFixedWidth(140)
+        combo.setFixedWidth(160)
 
         idx = combo.findText(str(current))
         if idx >= 0:
@@ -433,7 +452,7 @@ class PropertiesPanel(QFrame):
         row.addStretch()
 
         btn = QPushButton()
-        btn.setFixedSize(140, 22)
+        btn.setFixedSize(160, 22)
         btn.setCursor(Qt.PointingHandCursor)
         btn._current_color = current
 
@@ -480,7 +499,7 @@ class PropertiesPanel(QFrame):
         row.addStretch()
 
         picker = FontPickerButton(current)
-        picker.setFixedWidth(140)
+        picker.setFixedWidth(160)
         picker.font_changed.connect(lambda f, k=key: self._on_prop_change(k, f, commit=True))
 
         row.addWidget(picker)
@@ -533,18 +552,17 @@ class PropertiesPanel(QFrame):
         row.addStretch()
 
         controls = QWidget()
-        controls.setFixedWidth(140)
+        controls.setFixedWidth(160)
         controls_layout = QHBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(4)
 
-        # Remove Spinbox Arrows and Label explicitly to fix Squishing
+        # Remove Label explicitly to fix Squishing
         lbl_x = QLabel("X:")
         lbl_x.setStyleSheet("color: #808080; font-size: 10px; font-weight: bold;")
         x_spin = QSpinBox()
         x_spin.setRange(min_val, max_val)
         x_spin.setValue(int(current_x))
-        x_spin.setButtonSymbols(QSpinBox.NoButtons)
         x_spin.setStyleSheet(self.spinbox_style)
         x_spin.setAlignment(Qt.AlignCenter)
 
@@ -553,7 +571,6 @@ class PropertiesPanel(QFrame):
         y_spin = QSpinBox()
         y_spin.setRange(min_val, max_val)
         y_spin.setValue(int(current_y))
-        y_spin.setButtonSymbols(QSpinBox.NoButtons)
         y_spin.setStyleSheet(self.spinbox_style)
         y_spin.setAlignment(Qt.AlignCenter)
 
@@ -607,7 +624,7 @@ class PropertiesPanel(QFrame):
         combo = QComboBox()
         combo.addItems(applied)
         combo.setStyleSheet(self.combo_style)
-        combo.setFixedWidth(140)
+        combo.setFixedWidth(160)
 
         if primary:
             idx = combo.findText(primary)
