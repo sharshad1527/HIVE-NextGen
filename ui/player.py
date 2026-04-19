@@ -4,6 +4,7 @@ import qtawesome as qta
 import os
 import time
 import hashlib
+import math
 from PySide6.QtWidgets import (QFrame, QVBoxLayout, QHBoxLayout, QPushButton, 
                                QLabel, QSlider, QWidget, QStackedWidget, QComboBox, QApplication)
 from PySide6.QtCore import Qt, Signal, QTimer, QUrl, QRect
@@ -62,6 +63,9 @@ class PlayerPanel(QFrame):
         self.is_preview_mode = False
         self.preview_duration = 0
         self.preview_position = 0
+
+        # Multi-Track Audio Engine Data
+        self.audio_players = {}
 
         self.play_timer = QTimer(self)
         self.play_timer.setTimerType(Qt.PreciseTimer) # Optimization: Forces OS high-precision timing for buttery smooth framerates
@@ -193,19 +197,18 @@ class PlayerPanel(QFrame):
         self.timeline_canvas.set_frame(frame)
 
     def _on_res_changed(self, res_text):
-        """Reduces the total number of pixels the engine draws to dramatically speed up playback."""
         if res_text == "Full":
             self.render_engine.set_render_scale(1.0)
             self.render_engine.set_render_fps(30.0)
         elif res_text == "1/2":
             self.render_engine.set_render_scale(0.5)
-            self.render_engine.set_render_fps(30.0) # Keep smooth 30fps, just drop pixel count!
+            self.render_engine.set_render_fps(30.0)
         elif res_text == "1/4":
             self.render_engine.set_render_scale(0.25)
             self.render_engine.set_render_fps(30.0)
         elif res_text == "1/8":
             self.render_engine.set_render_scale(0.125)
-            self.render_engine.set_render_fps(24.0) # Extreme potato mode
+            self.render_engine.set_render_fps(24.0)
             
         self.resolution_changed.emit(res_text)
         
@@ -247,7 +250,6 @@ class PlayerPanel(QFrame):
                     
             if proxy_path and os.path.exists(proxy_path):
                 active_path = proxy_path
-                print(f"PLAYER: Dynamically swapped to 360p PROXY for smooth playback.")
 
         if active_path and os.path.exists(active_path):
             if media_type == "video":
@@ -310,6 +312,71 @@ class PlayerPanel(QFrame):
             else:
                 self.btn_play.setIcon(qta.icon('mdi6.play', color='#e66b2c'))
 
+    # ================== AUDIO MIXING ENGINE ==================
+    def _sync_timeline_audio(self, current_ms):
+        """Dynamically spins up QMediaPlayers to playback intersecting audio for the entire timeline."""
+        project = project_manager.current_project
+        if not project: return
+        
+        active_clip_ids = set()
+        
+        for track in project.tracks:
+            if track.is_muted or track.is_hidden: continue
+            for clip in track.clips:
+                if clip.clip_type in ["video", "audio"] and clip.file_path:
+                    # Is this clip currently intersecting the playhead?
+                    if clip.start_time <= current_ms < clip.end_time:
+                        active_clip_ids.add(clip.clip_id)
+                        
+                        trim_in_ms = getattr(clip, 'trim_in', 0)
+                        if isinstance(clip.applied_effects, dict):
+                            fx_source_in = clip.applied_effects.get("source_in", 0) * 10
+                            trim_in_ms = max(trim_in_ms, fx_source_in)
+                            
+                        local_ms = (current_ms - clip.start_time) + trim_in_ms
+                        
+                        # Initialize a player if it doesn't exist
+                        if clip.clip_id not in self.audio_players:
+                            player = QMediaPlayer()
+                            audio_output = QAudioOutput()
+                            
+                            vol_db = clip.applied_effects.get("Volume", 0) if isinstance(clip.applied_effects, dict) else 0
+                            linear_vol = max(0.0, min(1.0, math.pow(10, vol_db / 20.0)))
+                            audio_output.setVolume(linear_vol)
+                            
+                            player.setAudioOutput(audio_output)
+                            player.setSource(QUrl.fromLocalFile(clip.file_path))
+                            player.setPosition(local_ms)
+                            
+                            if self.is_playing:
+                                player.play()
+                                
+                            self.audio_players[clip.clip_id] = {'player': player, 'output': audio_output}
+                        else:
+                            # Sync existing player
+                            player = self.audio_players[clip.clip_id]['player']
+                            if self.is_playing and player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+                                player.play()
+                            elif not self.is_playing and player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+                                player.pause()
+                                
+                            # Hard seek if it falls out of sync
+                            if abs(player.position() - local_ms) > 150:
+                                player.setPosition(local_ms)
+                                
+        # Cleanup inactive players that have passed out of bounds
+        stale_ids = set(self.audio_players.keys()) - active_clip_ids
+        for clip_id in stale_ids:
+            self.audio_players[clip_id]['player'].stop()
+            self.audio_players[clip_id]['player'].deleteLater()
+            self.audio_players[clip_id]['output'].deleteLater()
+            del self.audio_players[clip_id]
+
+    def _stop_all_timeline_audio(self):
+        """Silences the audio engine safely when paused."""
+        for clip_id, data in self.audio_players.items():
+            data['player'].pause()
+
     def _on_play_step(self):
         if not hasattr(self, 'playback_start_time'):
             self.playback_start_time = time.time()
@@ -326,6 +393,7 @@ class PlayerPanel(QFrame):
         # Optimization: Request frame immediately bypassing UI signal delays
         self.render_engine.request_frame(int(new_pos))
         self.playhead_seek_requested.emit(int(new_pos))
+        self._sync_timeline_audio(int(new_pos))
 
     def toggle_play(self):
         if self.is_preview_mode:
@@ -341,6 +409,7 @@ class PlayerPanel(QFrame):
                 self.play_timer.stop()
                 self.render_engine.set_playing(False)
                 self.btn_play.setIcon(qta.icon('mdi6.play', color='#e66b2c'))
+                self._stop_all_timeline_audio()
             else:
                 if self.playhead >= self.duration and self.duration > 0:
                     self.playhead_seek_requested.emit(0)
@@ -351,6 +420,7 @@ class PlayerPanel(QFrame):
                 self.play_timer.start(33) 
                 self.render_engine.set_playing(True)
                 self.btn_play.setIcon(qta.icon('mdi6.pause', color='#e66b2c'))
+                self._sync_timeline_audio(int(self.playhead))
                 
             self.is_playing = not self.is_playing
 
@@ -401,6 +471,10 @@ class PlayerPanel(QFrame):
         
         self.render_engine.request_frame(self.playhead)
         
+        if not self.is_playing:
+            self._sync_timeline_audio(int(self.playhead))
+            self._stop_all_timeline_audio()
+        
         if self.duration > 0:
             perc = int((self.playhead / self.duration) * 1000)
             perc = max(0, min(1000, perc))
@@ -447,3 +521,9 @@ class PlayerPanel(QFrame):
             self.player.setVideoOutput(None)
             self.player.setAudioOutput(None)
             self.player.deleteLater()
+            
+        for clip_id, data in self.audio_players.items():
+            data['player'].stop()
+            data['player'].deleteLater()
+            data['output'].deleteLater()
+        self.audio_players.clear()

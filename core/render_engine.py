@@ -183,7 +183,7 @@ class RenderEngine(QThread):
             
             cap = self.video_readers[reader_key]
             
-            # Extract proper trim offset from applied_effects (UI sets source_in via logic units, 1 unit = 10ms)
+            # Extract proper trim offset from applied_effects
             trim_in_ms = getattr(clip, 'trim_in', 0)
             if isinstance(clip.applied_effects, dict):
                 fx_source_in = clip.applied_effects.get("source_in", 0) * 10
@@ -192,19 +192,23 @@ class RenderEngine(QThread):
             local_ms = (current_ms - clip.start_time) + trim_in_ms
             current_pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
             
-            # Seek if out of sync (backward seeking, or big jumps forward)
-            if local_ms < current_pos_ms or (local_ms - current_pos_ms) > 100:
-                cap.set(cv2.CAP_PROP_POS_MSEC, local_ms)
-                
-            ret, frame = cap.read()
+            # FIX: Prevent violent micro-stuttering by only seeking on major jumps.
+            # Small offsets will be caught up instantly using continuous reads.
+            diff = local_ms - current_pos_ms
             
-            if not ret:
-                # Retry: OpenCV sometimes drops the first frame right after a seek
+            if diff < -70 or diff > 200:
+                # Big jump -> Hard seek required (Scrubbing / Cuts)
                 cap.set(cv2.CAP_PROP_POS_MSEC, local_ms)
                 ret, frame = cap.read()
+            else:
+                # Small jump or sequential -> Smooth continuous read
+                ret, frame = cap.read()
+                # Fast forward to drop frames silently if the engine is running a tiny bit slow
+                while ret and (local_ms - cap.get(cv2.CAP_PROP_POS_MSEC)) > 50:
+                    ret, frame = cap.read()
                 
             if not ret:
-                # Final Fallback: If local_ms is completely beyond the EOF, grab the very last frame so it doesn't blank out
+                # Final Fallback: Prevent blank-outs at the extreme edges of clips
                 fps = cap.get(cv2.CAP_PROP_FPS)
                 if fps > 0:
                     total_ms = (cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps) * 1000
@@ -229,7 +233,7 @@ class RenderEngine(QThread):
             rotation = props.get("Rotation", 0)
             opacity = props.get("Opacity", 100) / 100.0
 
-            # Direct mapping from Crop UI bounds (The UI already calculates proper aspect ratios)
+            # Direct mapping from Crop UI bounds
             crop_x = props.get("crop_x", 0) / 100.0
             crop_y = props.get("crop_y", 0) / 100.0
             crop_w = props.get("crop_w", 100) / 100.0
@@ -238,7 +242,6 @@ class RenderEngine(QThread):
             img_w = qimg.width()
             img_h = qimg.height()
 
-            # Identify the exact region of the image we want to keep
             cw = max(1.0, img_w * crop_w)
             ch = max(1.0, img_h * crop_h)
             cx = img_w * crop_x
@@ -256,7 +259,6 @@ class RenderEngine(QThread):
             if rotation != 0:
                 painter.rotate(rotation)
                 
-            # Map the cropped section to fill the project screen, then apply user scale
             ratio = min(proj_w / cw, proj_h / ch)
             draw_w = cw * ratio * scale_pct
             draw_h = ch * ratio * scale_pct

@@ -1763,6 +1763,53 @@ class TracksCanvas(QWidget):
                         painter.fillRect(rect, overlay_color)
                         painter.restore()
                 
+                # DRAW WAVEFORM OVERLAY FOR VIDEO
+                if item["type"] == "video" and item.get("waveform"):
+                    wave_data = item.get("waveform", [])
+                    if wave_data:
+                        painter.save()
+                        painter.setClipRect(rect)
+                        
+                        # Draw a dark background strip for the waveform
+                        wave_bg_h = int((th - 8) * 0.35)
+                        wave_bg_rect = QRect(rect.left(), rect.bottom() - wave_bg_h, rect.width(), wave_bg_h)
+                        painter.fillRect(wave_bg_rect, QColor(0, 0, 0, 150))
+                        
+                        wave_color = QColor(230, 107, 44, 220) if is_selected else QColor(0, 150, 150, 180) # Orange selected, Aqua unselected
+                        bar_width = 2 if z > 0.5 else 1
+                        wave_pen = QPen(wave_color, bar_width)
+                        wave_pen.setCapStyle(Qt.RoundCap)
+                        painter.setPen(wave_pen)
+                        
+                        max_wave_h = wave_bg_h - 4
+                        base_y = wave_bg_rect.bottom() - max_wave_h/2 - 2
+                        
+                        physical_step = max(3, bar_width * 2) 
+                        logical_step = physical_step / z
+                        
+                        start_logical = max(0, (visible_left - 10) / z - item["x"])
+                        end_logical = min(item["w"], (visible_right + 10) / z - item["x"])
+                        
+                        start_i = int(start_logical / logical_step)
+                        end_i = int(end_logical / logical_step) + 1
+                        
+                        samples_per_logical = 50.0 / 100.0
+                        source_in = item.get("source_in", 0)
+                        
+                        for i in range(start_i, end_i):
+                            logical_w_pos = item["x"] + (i * logical_step)
+                            logical_offset = logical_w_pos - item["x"]
+                            hx = int(logical_w_pos * z)
+                            
+                            sample_idx = int((source_in + logical_offset) * samples_per_logical)
+                            val = wave_data[sample_idx] if 0 <= sample_idx < len(wave_data) else 0
+                                
+                            h = (val / 100.0) * max_wave_h
+                            safe_h = max(2, min(h, max_wave_h))
+                            painter.drawLine(hx, int(base_y - safe_h/2), hx, int(base_y + safe_h/2))
+                            
+                        painter.restore()
+
             elif item["type"] == "audio":
                 if is_selected:
                     painter.fillPath(path, QColor(230, 107, 44, 25))
