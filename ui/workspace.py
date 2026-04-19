@@ -208,7 +208,10 @@ class DraggableCard(QFrame):
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.drag_start_pos = event.position().toPoint()
-            self.card_clicked.emit(self, event.modifiers())
+            # Defer deselect-on-click if we might be starting a drag on a multi-selection
+            modifiers = event.modifiers()
+            if not getattr(self, 'is_selected', False) or modifiers:
+                self.card_clicked.emit(self, modifiers)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton and self.item_type == "folder":

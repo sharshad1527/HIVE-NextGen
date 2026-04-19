@@ -563,23 +563,25 @@ class TracksCanvas(QWidget):
             elif drop_type in ["media", "caption", "effect"] and self._drop_target_type in ["track", "track_new", "track_insert"]:
                 expected_group = "video" if subtype in ["video", "image"] else ("audio" if subtype == "audio" else ("caption" if drop_type == "caption" else "effect"))
                 
-                target_track = None
-                
-                if self._drop_target_type == "track_insert":
-                    target_track = f"{expected_group}_{random.randint(10000, 99999)}"
-                    # Pre-insert a dummy def so `_cleanup_empty_tracks` preserves position
-                    idx = getattr(self, "_drop_target_insert_index", len(self.track_defs))
-                    self.track_defs.insert(idx, {"id": target_track, "group": expected_group, "label": "New", "icon": "", "height": 48})
-                elif self._drop_target_type == "track":
-                    target_track = self._get_track_at_y(pos.y())
-                
-                if not target_track or self._get_track_group(target_track) != expected_group:
-                    target_track = None
-                    for t in self.track_defs:
-                        if t["group"] == expected_group:
-                            target_track = t["id"]
-                            break
-                    if not target_track: target_track = f"{expected_group}_1"
+                # Define the shared batch target track outside so multiple items map to the SAME new track
+                target_track = getattr(self, '_batch_target_track', None)
+                if not target_track:
+                    if self._drop_target_type == "track_insert":
+                        target_track = f"{expected_group}_{random.randint(10000, 99999)}"
+                        idx = getattr(self, "_drop_target_insert_index", len(self.track_defs))
+                        self.track_defs.insert(idx, {"id": target_track, "group": expected_group, "label": "New", "icon": "", "height": 48})
+                    elif self._drop_target_type == "track":
+                        target_track = self._get_track_at_y(pos.y())
+                    
+                    if not target_track or self._get_track_group(target_track) != expected_group:
+                        target_track = None
+                        for t in self.track_defs:
+                            if t["group"] == expected_group:
+                                target_track = t["id"]
+                                break
+                        if not target_track: target_track = f"{expected_group}_1"
+                    
+                    self._batch_target_track = target_track
 
                 display_text = os.path.basename(file_path) if file_path else (title if title else "New Item")
     
@@ -670,6 +672,7 @@ class TracksCanvas(QWidget):
         self._drop_target_rect = None
         self._drop_target_type = None
         self._drop_target_edge = None
+        self._batch_target_track = None
         self.update()
         event.acceptProposedAction()
 
@@ -729,45 +732,43 @@ class TracksCanvas(QWidget):
                 target_track = f"{expected_group}_1"
     
             display_text = os.path.basename(file_path) if file_path else (title if title else "New Item")
-        
-        item_w = 1000
-        max_w = float('inf')
-        
-        if data.get("duration"):
-            item_w = int(float(data.get("duration")) * 100)
-            if subtype in ["video", "audio"]: max_w = item_w
-        elif drop_type == "caption":
-            item_w = 400
-        elif drop_type == "effect":
-            item_w = 1500
-        elif subtype == "image":
-            item_w = int(app_config.get_setting("default_image_duration", 5.0) * 100)
-        elif subtype in ["video", "audio"] and file_path:
-            duration_sec = 0
-            # 1. Try native wave module for flawless .wav parsing
-            if file_path.lower().endswith('.wav'):
-                try:
-                    import wave
-                    with wave.open(file_path, 'rb') as w_file:
-                        duration_sec = w_file.getnframes() / float(w_file.getframerate())
-                except Exception:
-                    pass
             
-            # 2. Try OpenCV FFmpeg backend for .mp3, .m4a, and .mp4 videos
-            if duration_sec <= 0 and CV2_AVAILABLE:
-                try:
-                    cap = cv2.VideoCapture(file_path)
-                    fps = cap.get(cv2.CAP_PROP_FPS)
-                    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                    if fps > 0:
-                        duration_sec = frames / fps
-                    cap.release()
-                except Exception:
-                    pass
-                    
-            if duration_sec > 0:
-                item_w = int(duration_sec * 100)
-                max_w = item_w
+            item_w = 1000
+            max_w = float('inf')
+            
+            if data.get("duration"):
+                item_w = int(float(data.get("duration")) * 100)
+                if subtype in ["video", "audio"]: max_w = item_w
+            elif drop_type == "caption":
+                item_w = 400
+            elif drop_type == "effect":
+                item_w = 1500
+            elif subtype == "image":
+                item_w = int(app_config.get_setting("default_image_duration", 5.0) * 100)
+            elif subtype in ["video", "audio"] and file_path:
+                duration_sec = 0
+                if file_path.lower().endswith('.wav'):
+                    try:
+                        import wave
+                        with wave.open(file_path, 'rb') as w_file:
+                            duration_sec = w_file.getnframes() / float(w_file.getframerate())
+                    except Exception:
+                        pass
+                
+                if duration_sec <= 0 and CV2_AVAILABLE:
+                    try:
+                        cap = cv2.VideoCapture(file_path)
+                        fps = cap.get(cv2.CAP_PROP_FPS)
+                        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                        if fps > 0:
+                            duration_sec = frames / fps
+                        cap.release()
+                    except Exception:
+                        pass
+                        
+                if duration_sec > 0:
+                    item_w = int(duration_sec * 100)
+                    max_w = item_w
 
             new_item = {
                 "id": f"{drop_type}_{random.randint(10000, 99999)}",
@@ -791,7 +792,7 @@ class TracksCanvas(QWidget):
                             new_item["x"] = i["x"] + i["w"]
                     if not overlap:
                         break
-    
+        
             self.items.append(new_item)
             if new_item["type"] in ["audio", "video"] and new_item["file_path"]:
                 media_manager.request_waveform(new_item["file_path"])
