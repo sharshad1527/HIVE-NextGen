@@ -3,10 +3,12 @@
 import os
 import time
 import random
+import copy
 from PySide6.QtCore import QThread, Signal, Qt, QObject, QMutex, QMutexLocker, QRectF
 from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen, QBrush, QRadialGradient
 from core.project_manager import project_manager
 from core.app_config import app_config
+from core.models import ClipData
 
 try:
     import cv2
@@ -34,6 +36,7 @@ class RenderEngine(QThread):
         self._render_scale = 1.0
         self._run_flag = True
         self._force_render = False
+        self.preview_preset = None
 
     def request_frame(self, logical_time):
         """Called by the UI when the playhead moves (scrubbing or stepping)."""
@@ -55,6 +58,12 @@ class RenderEngine(QThread):
             self._render_scale = scale
             if not self.is_playing:
                 self._force_render = True
+                
+    def set_preview_preset(self, preset_data):
+        """Injects a preset to be previewed directly on the canvas without altering the project."""
+        with QMutexLocker(self.mutex):
+            self.preview_preset = preset_data
+            self._force_render = True
 
     def _clear_readers(self):
         for cap in self.video_readers.values():
@@ -98,6 +107,41 @@ class RenderEngine(QThread):
         except:
             return 0
 
+    def _get_effective_clip(self, original_clip):
+        """Temporarily injects preview preset properties into the active clip for rendering cleanly."""
+        if not getattr(self, "preview_preset", None):
+            return original_clip
+            
+        ptype = self.preview_preset.get("type")
+        if ptype not in ["effect", "transition", "caption"]:
+            return original_clip
+            
+        clip = copy.copy(original_clip)
+        # Clear existing applied effects and transitions to cleanly preview what the user is hovering/clicking!
+        clip.applied_effects = {}
+        clip.transition_in = None
+        clip.transition_out = None
+        
+        pname = self.preview_preset.get("title")
+        props = self.preview_preset.get("preset_properties", {})
+        
+        from core.preset_loader import get_default_properties
+        defaults = get_default_properties({"properties": props})
+        
+        if ptype == "effect" and clip.clip_type in ["video", "image"]:
+            clip.applied_effects["applied_effects"] = [pname]
+            clip.applied_effects["primary_effect"] = pname
+            for k, v in defaults.items(): 
+                clip.applied_effects[k] = v
+            
+        elif ptype == "transition" and clip.clip_type in ["video", "image"]:
+            clip.applied_effects["transition_out"] = pname
+            clip.applied_effects["transition_out_duration"] = 30
+            clip.transition_out = pname
+            clip.transition_out_duration = 30
+            
+        return clip
+
     def _composite_frame(self, logical_time):
         if not CV2_AVAILABLE:
             return self._create_error_frame("OpenCV (cv2) is not installed.\nPlease install opencv-python."), set()
@@ -135,7 +179,8 @@ class RenderEngine(QThread):
         for track in reversed_tracks:
             if track.is_hidden: continue
             
-            for clip in track.clips:
+            for original_clip in track.clips:
+                clip = self._get_effective_clip(original_clip)
                 if clip.start_time <= current_ms < clip.end_time:
                     
                     if clip.clip_type in ["video", "image"]:
@@ -143,6 +188,10 @@ class RenderEngine(QThread):
                         self._draw_media(painter, clip, current_ms, proj_w, proj_h)
                         
                     elif clip.clip_type == "effect":
+                        # Do not draw other generic effects if we are currently globally previewing one
+                        if getattr(self, "preview_preset", None) and self.preview_preset.get("type") in ["effect", "caption", "transition"]:
+                            continue
+                            
                         active_clip_ids.add(clip.clip_id)
                         painter.end()
                         canvas = self._apply_track_effect(canvas, clip, render_w, render_h)
@@ -156,8 +205,22 @@ class RenderEngine(QThread):
                         painter.scale(self._render_scale, self._render_scale)
                         
                     elif clip.clip_type == "caption":
+                        # Do not draw other generic captions if we are currently previewing one
+                        if getattr(self, "preview_preset", None) and self.preview_preset.get("type") in ["effect", "caption", "transition"]:
+                            continue
+                            
                         active_clip_ids.add(clip.clip_id)
                         self._draw_caption(painter, clip, proj_w, proj_h)
+                        
+        # Global Preview Pass for Captions
+        if getattr(self, "preview_preset", None) and self.preview_preset.get("type") == "caption":
+            props = self.preview_preset.get("preset_properties", {})
+            from core.preset_loader import get_default_properties
+            defaults = get_default_properties({"properties": props})
+            defaults["text"] = "Preview Caption"
+            
+            fake_clip = ClipData(file_path="", start_time=0, end_time=999999, clip_type="caption", applied_effects=defaults)
+            self._draw_caption(painter, fake_clip, proj_w, proj_h)
                         
         painter.end()
         return canvas, active_clip_ids

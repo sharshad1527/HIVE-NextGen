@@ -3,7 +3,7 @@ import qtawesome as qta
 import random
 import os
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                               QPushButton, QLabel, QSplitter, QFrame, QGridLayout)
+                               QPushButton, QLabel, QSplitter, QFrame, QGridLayout, QDialog, QApplication)
 from PySide6.QtCore import Qt, QPoint, QTimer
 from PySide6.QtGui import QPainter, QColor, QRadialGradient, QImage, QPixmap
 
@@ -162,7 +162,6 @@ class MainWindow(QMainWindow):
         self.setup_shortcuts()
         self.setup_autosave()
         
-        # FIX: Ensure MainWindow catches the project load to fill the Media Bin
         global_signals.project_loaded.connect(self.on_project_loaded)
         if project_manager.current_project:
             QTimer.singleShot(0, lambda: self.on_project_loaded(project_manager.current_project))
@@ -237,10 +236,14 @@ class MainWindow(QMainWindow):
 
         self.panel_timeline.tracks_canvas.v1_duration_changed.connect(self.panel_player.update_duration)
         self.panel_timeline.tracks_canvas.playhead_changed.connect(self.panel_player.update_playhead)
+        
         self.panel_player.playhead_seek_requested.connect(self.panel_timeline.tracks_canvas.set_playhead)
 
         self.panel_workspace.add_item_to_timeline.connect(self.panel_timeline.tracks_canvas.add_item_directly)
         self.panel_workspace.preview_requested.connect(self.panel_player.load_preview)
+        
+        self.panel_workspace.media_load_started.connect(self.on_media_load_started)
+        self.panel_workspace.media_load_finished.connect(self.on_media_load_finished)
 
         initial_duration = self.panel_timeline.tracks_canvas.get_v1_duration()
         self.panel_player.update_duration(initial_duration)
@@ -256,37 +259,30 @@ class MainWindow(QMainWindow):
     def setup_autosave(self):
         self.is_dirty = False
         
-        # We keep a background timer using user settings
         self.auto_save_timer = QTimer(self)
         self.auto_save_timer.timeout.connect(self.auto_save_project)
         
-        # Pull interval from settings (convert minutes to milliseconds)
         interval_mins = app_config.get_setting("auto_save_interval", 5)
         self.auto_save_timer.start(interval_mins * 60 * 1000)
         
-        # FIX: Every edit made tries to instantly save the project
         self.panel_timeline.tracks_canvas.state_changed.connect(self.mark_unsaved)
 
     def mark_unsaved(self):
-        """Called whenever the timeline changes. Marks as dirty, uses debounced save."""
         if not self.is_dirty:
             self.is_dirty = True
             self.title_bar.set_saved_state(False)
             
-        # Use a debounced delayed save (waits 3s after last change before saving)
         if not hasattr(self, '_debounce_timer'):
             self._debounce_timer = QTimer(self)
             self._debounce_timer.setSingleShot(True)
             self._debounce_timer.timeout.connect(self._debounced_save)
-        self._debounce_timer.start(3000)  # 3 seconds after last change
+        self._debounce_timer.start(3000) 
 
     def _debounced_save(self):
-        """Saves after a quiet period of no changes."""
         if self.is_dirty and app_config.get_setting("auto_save_enabled", True):
             self.save_current_project()
 
     def auto_save_project(self):
-        """Background saving loop. Respects auto-save toggle setting."""
         if self.is_dirty and app_config.get_setting("auto_save_enabled", True):
             print("Auto-Saving in background...")
             self.save_current_project()
@@ -320,16 +316,12 @@ class MainWindow(QMainWindow):
     def open_settings(self):
         dialog = SettingsDialog(self)
         dialog.exec()
-        self.sidebar.clear_selection() # Reset sidebar styling state
-        
-        # Sync the interval live just in case it was changed
+        self.sidebar.clear_selection() 
         interval_mins = app_config.get_setting("auto_save_interval", 5)
         self.auto_save_timer.setInterval(interval_mins * 60 * 1000)
         
     def save_current_project(self):
-        """Packs Timeline data, saves to .hive file, and resets UI indicators."""
         self.panel_timeline.tracks_canvas.sync_to_project()
-        
         duration_str = self.panel_timeline.tracks_canvas.get_formatted_duration()
         
         if project_manager.save_project(duration_str=duration_str):
@@ -338,14 +330,38 @@ class MainWindow(QMainWindow):
             
     def on_project_loaded(self, project_data):
         print(f"MAIN WINDOW: Loading Workspace Media Bin...")
-        # Reload Media Bin files instantly upon startup
         if hasattr(project_data, 'media_bin') and project_data.media_bin:
             self.panel_workspace.load_media_bin_from_paths(project_data.media_bin)
         else:
             self.panel_workspace.clear_media_bin()
             
+    def on_media_load_started(self):
+        if not hasattr(self, 'loading_dialog'):
+            self.loading_dialog = QDialog(self)
+            self.loading_dialog.setWindowModality(Qt.ApplicationModal)
+            self.loading_dialog.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+            self.loading_dialog.setFixedSize(200, 80)
+            self.loading_dialog.setStyleSheet("background-color: #151515; border: 1px solid #e66b2c; border-radius: 8px;")
+            layout = QVBoxLayout(self.loading_dialog)
+            lbl = QLabel("Loading Media...")
+            lbl.setStyleSheet("color: #d1d1d1; font-weight: bold; font-size: 14px;")
+            lbl.setAlignment(Qt.AlignCenter)
+            layout.addWidget(lbl)
+            
+        if not self.loading_dialog.isVisible():
+            self.loading_dialog.show()
+            QApplication.processEvents()
+            
+    def on_media_load_finished(self):
+        # We use a slight delay to allow all fast-successive threads to settle 
+        # and cleanly hide the dialog instead of it constantly flashing Open/Closed.
+        def check_close():
+            if len(self.panel_workspace.active_threads) == 0:
+                if hasattr(self, 'loading_dialog') and self.loading_dialog.isVisible():
+                    self.loading_dialog.hide() 
+        QTimer.singleShot(250, check_close)
+
     def closeEvent(self, event):
-        """Guarantees the project is saved before the window is destroyed."""
         print("Safeguard: Executing final save before closing...")
         self.save_current_project()
         event.accept()

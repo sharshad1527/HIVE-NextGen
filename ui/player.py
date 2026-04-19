@@ -400,12 +400,8 @@ class TimelinePreviewCanvas(QWidget):
             self._resizing = False
             self.setCursor(Qt.ArrowCursor)
             
-            # Trigger a save state on the timeline
-            # The timeline canvas listens for property changes via update_item_property
-            # and calls save_state, so we just need to emit at the property level
             clip = self._get_selected_clip_data()
             if clip and isinstance(clip.applied_effects, dict):
-                # Also update timeline items to keep in sync
                 global_signals.clip_transform_changed.emit(
                     self._selected_clip_id, "Position_X", clip.applied_effects.get("Position_X", 0)
                 )
@@ -431,10 +427,10 @@ class PlayerPanel(QFrame):
         self.is_playing = False
         
         self.is_preview_mode = False
+        self.is_timeline_preview = False
         self.preview_duration = 0
         self.preview_position = 0
 
-        # Multi-Track Audio Engine Data
         self.audio_players = {}
 
         self.play_timer = QTimer(self)
@@ -477,10 +473,8 @@ class PlayerPanel(QFrame):
         self.video_widget = QVideoWidget()
         self.timeline_canvas = TimelinePreviewCanvas()
         
-        # Connect interactive transform signals
         self.timeline_canvas.transform_changed.connect(self._on_canvas_transform)
         
-        # Connect global property changes to force a re-render
         if hasattr(global_signals, 'clip_transform_changed'):
             global_signals.clip_transform_changed.connect(self._on_property_changed_rerender)
         
@@ -567,30 +561,23 @@ class PlayerPanel(QFrame):
         self.player.durationChanged.connect(self._on_player_duration_changed)
         self.player.playbackStateChanged.connect(self._on_player_state_changed)
         
-        # Listen for clip selection to enable interactive handles
         global_signals.clip_selected.connect(self._on_clip_selected_for_preview)
         global_signals.clip_deselected.connect(self._on_clip_deselected_for_preview)
-        
-        # Listen for property changes to force a re-render
         global_signals.clip_transform_changed.connect(self._on_property_changed_rerender)
         
         if QApplication.instance():
             QApplication.instance().aboutToQuit.connect(self._cleanup)
 
     def _on_clip_selected_for_preview(self, item_type, clip_id):
-        """Enable interactive handles in the preview canvas when a clip is selected."""
         self.timeline_canvas.set_selected_clip(clip_id)
     
     def _on_clip_deselected_for_preview(self):
-        """Disable interactive handles when no clip is selected."""
         self.timeline_canvas.set_selected_clip("")
 
     def _on_canvas_transform(self, clip_id, prop_name, value):
-        """Forward transform changes from the interactive canvas to the global signal hub."""
         global_signals.clip_transform_changed.emit(clip_id, prop_name, value)
 
     def _on_property_changed_rerender(self, clip_id, prop_name, value):
-        """Force re-render whenever any clip property changes (from panel or canvas)."""
         self.render_engine.request_frame(int(self.playhead))
 
     def _on_timeline_frame_received(self, frame):
@@ -612,12 +599,57 @@ class PlayerPanel(QFrame):
             
         self.resolution_changed.emit(res_text)
         
-        if self.is_preview_mode:
+        if self.is_preview_mode and not self.is_timeline_preview:
             self._apply_preview_source()
 
     def load_preview(self, media_data):
         self.current_preview_data = media_data
+        preset_type = media_data.get("type")
+        
+        # Context-Aware Timeline Previewing for Presets
+        if preset_type in ["effect", "caption", "transition"]:
+            self.is_preview_mode = True
+            self.is_timeline_preview = True
+            self.preview_duration = 4500  # 4.5 seconds loop limit
+            self.preview_position = 0
+            
+            if preset_type == "transition" and hasattr(self, "timeline_canvas") and getattr(self, "timeline_canvas", None):
+                clip = None
+                # Try to use V1 to show the transition in full glory optimally jumping back to 2 seconds before the end of the clip under playhead
+                project = project_manager.current_project
+                if project:
+                    for t in project.tracks:
+                        if t.track_id == "video_1":
+                            for c in t.clips:
+                                if c.start_time <= self.playhead * 10 < c.end_time:
+                                    clip = c
+                                    break
+                if clip:
+                    target_ms = max(clip.start_time, clip.end_time - 2000)
+                    self.playhead = target_ms / 10.0
+                    self.playhead_seek_requested.emit(int(self.playhead))
+            
+            self.playback_start_time = time.time()
+            self.playback_start_playhead = self.playhead
+            
+            if hasattr(self.render_engine, 'set_preview_preset'):
+                self.render_engine.set_preview_preset(media_data)
+                
+            self.player.stop()
+            self.media_stack.setCurrentWidget(self.timeline_canvas)
+            
+            if not self.is_playing:
+                self.play_timer.start(33)
+                self.render_engine.set_playing(True)
+                self.btn_play.setIcon(qta.icon('mdi6.pause', color='#e66b2c'))
+                self.is_playing = True
+            return
+            
+        if hasattr(self.render_engine, 'set_preview_preset'):
+            self.render_engine.set_preview_preset(None)
+            
         self.is_preview_mode = True 
+        self.is_timeline_preview = False
         self.preview_duration = 0
         self.preview_position = 0
         self._first_load_done = False
@@ -691,7 +723,7 @@ class PlayerPanel(QFrame):
             self._update_timecode_label(preview=True)
 
     def _on_player_position_changed(self, position):
-        if self.is_preview_mode:
+        if self.is_preview_mode and not self.is_timeline_preview:
             self.preview_position = position
             self._update_timecode_label(preview=True)
             if self.preview_duration > 0:
@@ -701,12 +733,12 @@ class PlayerPanel(QFrame):
                 self.scrubber.blockSignals(False)
 
     def _on_player_duration_changed(self, duration):
-        if self.is_preview_mode and duration > 0:
+        if self.is_preview_mode and not self.is_timeline_preview and duration > 0:
             self.preview_duration = duration
             self._update_timecode_label(preview=True)
 
     def _on_player_state_changed(self, state):
-        if self.is_preview_mode:
+        if self.is_preview_mode and not self.is_timeline_preview:
             if state == QMediaPlayer.PlaybackState.PlayingState:
                 self.btn_play.setIcon(qta.icon('mdi6.pause', color='#e66b2c'))
             else:
@@ -714,12 +746,10 @@ class PlayerPanel(QFrame):
 
     # ================== AUDIO MIXING ENGINE ==================
     def _sync_timeline_audio(self, logical_pos):
-        """Dynamically spins up QMediaPlayers to playback intersecting audio for the entire timeline."""
         project = project_manager.current_project
         if not project: return
         
         active_clip_ids = set()
-        
         current_ms = int(logical_pos * 10)
         
         for track in project.tracks:
@@ -775,7 +805,6 @@ class PlayerPanel(QFrame):
             del self.audio_players[clip_id]
 
     def _stop_all_timeline_audio(self):
-        """Silences the audio engine safely when paused."""
         for clip_id, data in self.audio_players.items():
             data['player'].pause()
 
@@ -785,8 +814,22 @@ class PlayerPanel(QFrame):
             self.playback_start_playhead = self.playhead
             
         elapsed = time.time() - self.playback_start_time
-        
         new_pos = self.playback_start_playhead + (elapsed * 100.0)
+        
+        if self.is_timeline_preview:
+            # Elegantly stop the contextual preset preview after 4.5 seconds to avoid infinite loops
+            if elapsed > 4.5: 
+                self.toggle_play()
+                self.is_preview_mode = False
+                self.is_timeline_preview = False
+                if hasattr(self.render_engine, 'set_preview_preset'):
+                    self.render_engine.set_preview_preset(None)
+                self.render_engine.request_frame(int(self.playhead))
+            else:
+                self.preview_position = (new_pos - self.playback_start_playhead) * 10
+                self._update_timecode_label(preview=True)
+                self.render_engine.request_frame(int(new_pos))
+            return
         
         if new_pos >= self.duration and self.duration > 0:
             new_pos = self.duration
@@ -797,7 +840,7 @@ class PlayerPanel(QFrame):
         self._sync_timeline_audio(int(new_pos))
 
     def toggle_play(self):
-        if self.is_preview_mode:
+        if self.is_preview_mode and not self.is_timeline_preview:
             if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
                 self.player.pause()
             else:
@@ -810,9 +853,10 @@ class PlayerPanel(QFrame):
                 self.play_timer.stop()
                 self.render_engine.set_playing(False)
                 self.btn_play.setIcon(qta.icon('mdi6.play', color='#e66b2c'))
-                self._stop_all_timeline_audio()
+                if not self.is_timeline_preview:
+                    self._stop_all_timeline_audio()
             else:
-                if self.playhead >= self.duration and self.duration > 0:
+                if not self.is_timeline_preview and self.playhead >= self.duration and self.duration > 0:
                     self.playhead_seek_requested.emit(0)
                 
                 self.playback_start_time = time.time()
@@ -821,18 +865,19 @@ class PlayerPanel(QFrame):
                 self.play_timer.start(33) 
                 self.render_engine.set_playing(True)
                 self.btn_play.setIcon(qta.icon('mdi6.pause', color='#e66b2c'))
-                self._sync_timeline_audio(int(self.playhead))
+                if not self.is_timeline_preview:
+                    self._sync_timeline_audio(int(self.playhead))
                 
             self.is_playing = not self.is_playing
 
     def step_forward(self):
-        if self.is_preview_mode:
+        if self.is_preview_mode and not self.is_timeline_preview:
             self.player.setPosition(min(self.preview_duration, self.player.position() + 1000))
         else:
             self.playhead_seek_requested.emit(min(self.duration, self.playhead + 16))
 
     def step_backward(self):
-        if self.is_preview_mode:
+        if self.is_preview_mode and not self.is_timeline_preview:
             self.player.setPosition(max(0, self.player.position() - 1000))
         else:
             self.playhead_seek_requested.emit(max(0, self.playhead - 16))
@@ -841,7 +886,8 @@ class PlayerPanel(QFrame):
         if self.is_preview_mode:
             if self.preview_duration > 0:
                 new_pos = int((val / 1000.0) * self.preview_duration)
-                self.player.setPosition(new_pos)
+                if not self.is_timeline_preview:
+                    self.player.setPosition(new_pos)
         else:
             if self.duration > 0:
                 new_playhead = (val / 1000.0) * self.duration
@@ -856,32 +902,37 @@ class PlayerPanel(QFrame):
     def update_playhead(self, playhead_logical):
         if self.is_preview_mode:
             self.is_preview_mode = False
+            self.is_timeline_preview = False
+            if hasattr(self.render_engine, 'set_preview_preset'):
+                self.render_engine.set_preview_preset(None)
             self.player.stop()
             self.media_stack.setCurrentWidget(self.timeline_canvas)
-            self.btn_play.setIcon(qta.icon('mdi6.play', color='#e66b2c'))
+            if self.is_playing:
+                self.toggle_play()
             
         self.playhead = playhead_logical
         self._update_timecode_label()
         
-        if self.is_playing:
+        if self.is_playing and not self.is_timeline_preview:
             if hasattr(self, 'playback_start_playhead'):
                 expected_pos = self.playback_start_playhead + ((time.time() - self.playback_start_time) * 100.0)
                 if abs(self.playhead - expected_pos) > 10: 
                     self.playback_start_time = time.time()
                     self.playback_start_playhead = self.playhead
         
-        self.render_engine.request_frame(self.playhead)
-        
-        if not self.is_playing:
-            self._sync_timeline_audio(int(self.playhead))
-            self._stop_all_timeline_audio()
-        
-        if self.duration > 0:
-            perc = int((self.playhead / self.duration) * 1000)
-            perc = max(0, min(1000, perc))
-            self.scrubber.blockSignals(True)
-            self.scrubber.setValue(perc)
-            self.scrubber.blockSignals(False)
+        if not self.is_timeline_preview:
+            self.render_engine.request_frame(self.playhead)
+            
+            if not self.is_playing:
+                self._sync_timeline_audio(int(self.playhead))
+                self._stop_all_timeline_audio()
+            
+            if self.duration > 0:
+                perc = int((self.playhead / self.duration) * 1000)
+                perc = max(0, min(1000, perc))
+                self.scrubber.blockSignals(True)
+                self.scrubber.setValue(perc)
+                self.scrubber.blockSignals(False)
 
     def _update_timecode_label(self, preview=False):
         def format_time(val, is_ms=False):
