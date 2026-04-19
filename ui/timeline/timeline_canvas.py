@@ -112,6 +112,8 @@ class TracksCanvas(QWidget):
         # load_from_project has a chance to populate self.items.
 
         global_signals.waveform_ready.connect(self._on_waveform_ready)
+        if hasattr(global_signals, 'clip_transform_changed'):
+            global_signals.clip_transform_changed.connect(self._on_external_transform)
 
     def _cleanup_threads(self):
         """Clears pending thumbnail loads to prevent crashes on exit."""
@@ -137,6 +139,14 @@ class TracksCanvas(QWidget):
             if item.get("file_path") == file_path:
                 item["waveform"] = waveform
         self.update()
+
+    def _on_external_transform(self, clip_id, prop_name, value):
+        """Called when the preview player moves/rotates a clip so timeline keeps local state synchronized."""
+        for item in self.items:
+            if item["id"] == clip_id:
+                item[prop_name] = value
+                # DO NOT CALL save_state() here, since dragged timeline events will save state on release
+                break
 
     def _on_dynamic_thumb_loaded(self, cache_key, qimg):
         """Callback when background thread finishes decoding a video frame."""
@@ -328,7 +338,7 @@ class TracksCanvas(QWidget):
                 self.item_clicked.emit("", "", {})
                 global_signals.clip_deselected.emit()
 
-    def update_item_property(self, item_id, prop_name, new_value):
+    def update_item_property(self, item_id, prop_name, new_value, save_state=True):
         if prop_name == "apply_transition_to_all":
             track_id = new_value.get("track")
             trans_name = new_value.get("transition")
@@ -340,14 +350,16 @@ class TracksCanvas(QWidget):
                     item["transition_out"] = trans_name
                     item["transition_out_duration"] = trans_dur
             self.update()
-            self.save_state()
+            if save_state:
+                self.save_state()
             return
             
         for item in self.items:
             if item["id"] == item_id:
                 item[prop_name] = new_value
                 self.update()
-                self.save_state()
+                if save_state:
+                    self.save_state()
                 break
         
         # Force the preview player to re-render with the updated property
@@ -551,12 +563,27 @@ class TracksCanvas(QWidget):
             elif drop_type == "effect" and self._drop_target_type == "clip":
                 item = next((i for i in self.items if i["id"] == self._drop_target_item), None)
                 if item:
-                    if "applied_effects" not in item:
-                        item["applied_effects"] = []
-                    if isinstance(item["applied_effects"], list):
-                        item["applied_effects"].append(title)
-                    else:
-                        item["applied_effects"] = [title]
+                    # applied_effects is historically a string OR a list. Ensure it's a list.
+                    current_effects = item.get("applied_effects", [])
+                    if isinstance(current_effects, str):
+                        current_effects = [current_effects]
+                    elif not isinstance(current_effects, list):
+                        current_effects = []
+                        
+                    if title not in current_effects:
+                        current_effects.append(title)
+                        
+                    item["applied_effects"] = current_effects
+                    item["primary_effect"] = title
+                    
+                    # Ensure preset defaults (like effect_amount) are injected!
+                    preset_props = data.get("preset_properties", {})
+                    if preset_props:
+                        from core.preset_loader import get_default_properties
+                        defaults = get_default_properties({"properties": preset_props})
+                        for k, v in defaults.items():
+                            item[k] = v
+                    
                     self.save_state()
                     self._emit_selection_state()
                     
@@ -635,6 +662,10 @@ class TracksCanvas(QWidget):
                     "max_w": max_w,
                     "source_in": 0
                 }
+                
+                if drop_type == "effect":
+                    new_item["primary_effect"] = title
+                    new_item["applied_effects"] = [title]
                 
                 # Merge preset properties from JSON-based presets (effects, captions, transitions)
                 preset_props = data.get("preset_properties", {})
@@ -880,8 +911,7 @@ class TracksCanvas(QWidget):
                         new_item_right["source_in"] = item.get("source_in", 0) + diff
                         
                         if item.get("max_w", float('inf')) != float('inf'):
-                            item["max_w"] = item["w"]
-                            new_item_right["max_w"] = new_item_right["w"]
+                            new_item_right["max_w"] = item["max_w"]
                         
                         freeze_item = {
                             "id": f"image_{random.randint(10000, 99999)}",
@@ -923,8 +953,7 @@ class TracksCanvas(QWidget):
                     new_item["source_in"] = item.get("source_in", 0) + diff
                     
                     if item.get("max_w", float('inf')) != float('inf'):
-                        item["max_w"] = item["w"]
-                        new_item["max_w"] = new_item["w"]
+                        new_item["max_w"] = item["max_w"]
                         
                     self.items.append(new_item)
                     changed = True
@@ -1394,8 +1423,7 @@ class TracksCanvas(QWidget):
                                         new_item["source_in"] = item.get("source_in", 0) + diff
                                         
                                         if item.get("max_w", float('inf')) != float('inf'):
-                                            item["max_w"] = item["w"]
-                                            new_item["max_w"] = new_item["w"]
+                                            new_item["max_w"] = item["max_w"]
                                             
                                         self.items.append(new_item)
                                         self.save_state()

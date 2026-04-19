@@ -263,6 +263,23 @@ class RenderEngine(QThread):
             pos_y = props.get("Position_Y", 0)
             rotation = props.get("Rotation", 0)
             opacity = props.get("Opacity", 100) / 100.0
+            
+            # Transition Playback Support (Cross Dissolve Alpha)
+            trans_in = props.get("transition_in")
+            if trans_in:
+                dur_frames = props.get("transition_in_duration", 30)
+                dur_ms = dur_frames * (1000.0 / 30.0)
+                elapsed_ms = current_ms - clip.start_time
+                if 0 <= elapsed_ms < dur_ms:
+                    opacity *= max(0.0, min(1.0, elapsed_ms / dur_ms))
+                    
+            trans_out = props.get("transition_out")
+            if trans_out:
+                dur_frames = props.get("transition_out_duration", 30)
+                dur_ms = dur_frames * (1000.0 / 30.0)
+                remaining_ms = clip.end_time - current_ms
+                if 0 <= remaining_ms < dur_ms:
+                    opacity *= max(0.0, min(1.0, remaining_ms / dur_ms))
 
             crop_x = props.get("crop_x", 0) / 100.0
             crop_y = props.get("crop_y", 0) / 100.0

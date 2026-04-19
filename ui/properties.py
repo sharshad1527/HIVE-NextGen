@@ -13,8 +13,8 @@ from core.project_manager import project_manager
 
 
 class PropertiesPanel(QFrame):
-    # Emits item_id, property_name, new_value
-    property_changed = Signal(str, str, object)
+    # Emits item_id, property_name, new_value, save_state(bool)
+    property_changed = Signal(str, str, object, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -136,12 +136,31 @@ class PropertiesPanel(QFrame):
         """Called when the preview player moves/rotates a clip — update our sliders without emitting back."""
         if clip_id == self.current_item_id:
             self._block_signals = True
-            if prop_name == "Position_X" and hasattr(self, 'spin_pos_x'):
-                self.spin_pos_x.setValue(int(value))
-            elif prop_name == "Position_Y" and hasattr(self, 'spin_pos_y'):
-                self.spin_pos_y.setValue(int(value))
-            elif prop_name == "Rotation" and hasattr(self, 'slider_rotation'):
-                self.slider_rotation.setValue(int(value))
+            
+            spin_x = getattr(self, 'spin_pos_x', None)
+            if self.current_sub_type == "image" and hasattr(self, 'spin_img_pos_x'):
+                spin_x = self.spin_img_pos_x
+            elif self.current_sub_type == "caption" and hasattr(self, 'spin_cap_pos_x'):
+                spin_x = self.spin_cap_pos_x
+                
+            spin_y = getattr(self, 'spin_pos_y', None)
+            if self.current_sub_type == "image" and hasattr(self, 'spin_img_pos_y'):
+                spin_y = self.spin_img_pos_y
+            elif self.current_sub_type == "caption" and hasattr(self, 'spin_cap_pos_y'):
+                spin_y = self.spin_cap_pos_y
+                
+            slider_rot = getattr(self, 'slider_rotation', None)
+            if self.current_sub_type == "image" and hasattr(self, 'slider_img_rotation'):
+                slider_rot = self.slider_img_rotation
+            elif self.current_sub_type == "caption" and hasattr(self, 'slider_cap_rotation'):
+                slider_rot = self.slider_cap_rotation
+
+            if prop_name == "Position_X" and spin_x:
+                spin_x.setValue(int(value))
+            elif prop_name == "Position_Y" and spin_y:
+                spin_y.setValue(int(value))
+            elif prop_name == "Rotation" and slider_rot:
+                slider_rot.setValue(int(value))
             self._block_signals = False
 
     def on_clip_selected(self, item_type: str, clip_id: str):
@@ -157,6 +176,7 @@ class PropertiesPanel(QFrame):
                     break
                     
         if selected_clip:
+            self.current_track = track.track_id
             self.populate_ui(selected_clip, item_type)
 
     def on_clip_deselected(self):
@@ -178,6 +198,8 @@ class PropertiesPanel(QFrame):
             self.show_properties("audio", clip_data.clip_id, props)
         elif item_type == "effect":
             self.show_properties("effect", clip_data.clip_id, props)
+        elif item_type in ["transition_in", "transition_out", "clip_effect"]:
+            self.show_properties(item_type, clip_data.clip_id, props)
         else:
             self.show_properties("", clip_data.clip_id, props)
 
@@ -267,18 +289,20 @@ class PropertiesPanel(QFrame):
             self.lbl_icon.setPixmap(qta.icon('mdi6.cog-outline', color='#e66b2c').pixmap(14, 14))
             self.stack.setCurrentWidget(self.page_empty)
 
-    def _on_prop_change(self, prop_name, new_val):
+    def _on_prop_change(self, prop_name, new_val, commit=True):
         if self.current_item_id and not self._block_signals:
-            self.property_changed.emit(self.current_item_id, prop_name, new_val)
+            self.property_changed.emit(self.current_item_id, prop_name, new_val, commit)
 
     def _apply_transition_to_all(self):
-        if self.current_item_id and self.current_item_props:
-            track = self.current_item_props.get("track")
+        if self.current_item_id and self.current_item_props is not None:
+            track = getattr(self, "current_track", None)
+            if not track: return
             current_trans = self.combo_transition.currentText()
             self.property_changed.emit(
                 self.current_item_id, 
                 "apply_transition_to_all", 
-                {"track": track, "transition": current_trans}
+                {"track": track, "transition": current_trans},
+                True
             )
 
     # --- UI Component Builders ---
@@ -315,7 +339,8 @@ class PropertiesPanel(QFrame):
         
         # Wire to property change signal
         if prop_name:
-            slider.valueChanged.connect(lambda v, p=prop_name: self._on_prop_change(p, v))
+            slider.valueChanged.connect(lambda v, p=prop_name: self._on_prop_change(p, v, commit=False))
+            slider.sliderReleased.connect(lambda s=slider, p=prop_name: self._on_prop_change(p, s.value(), commit=True))
         
         controls_layout.addWidget(slider)
         controls_layout.addWidget(val_lbl)
@@ -350,9 +375,9 @@ class PropertiesPanel(QFrame):
 
         # Wire to property change signal
         if prop_x:
-            x_spin.valueChanged.connect(lambda v, p=prop_x: self._on_prop_change(p, v))
+            x_spin.valueChanged.connect(lambda v, p=prop_x: self._on_prop_change(p, v, commit=True))
         if prop_y:
-            y_spin.valueChanged.connect(lambda v, p=prop_y: self._on_prop_change(p, v))
+            y_spin.valueChanged.connect(lambda v, p=prop_y: self._on_prop_change(p, v, commit=True))
 
         controls_layout.addWidget(x_spin)
         controls_layout.addWidget(y_spin)
@@ -374,7 +399,7 @@ class PropertiesPanel(QFrame):
         combo.setFixedWidth(140)
         
         if prop_name:
-            combo.currentTextChanged.connect(lambda t, p=prop_name: self._on_prop_change(p, t))
+            combo.currentTextChanged.connect(lambda t, p=prop_name: self._on_prop_change(p, t, commit=True))
         
         row.addWidget(combo)
         layout.addLayout(row)
@@ -443,7 +468,8 @@ class PropertiesPanel(QFrame):
         self._add_section(layout, "Content")
         self.input_text_caption = QLineEdit("")
         self.input_text_caption.setStyleSheet(self.input_style)
-        self.input_text_caption.textChanged.connect(lambda t: self._on_prop_change("text", t))
+        self.input_text_caption.textChanged.connect(lambda t: self._on_prop_change("text", t, commit=False))
+        self.input_text_caption.editingFinished.connect(lambda l=self.input_text_caption: self._on_prop_change("text", l.text(), commit=True))
         layout.addWidget(self.input_text_caption)
 
         self._add_section(layout, "Typography")

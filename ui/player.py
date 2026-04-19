@@ -116,9 +116,47 @@ class TimelinePreviewCanvas(QWidget):
         center_x = (self._proj_w / 2) + pos_x
         center_y = (self._proj_h / 2) + pos_y
         
-        # Approximate visible size (assumes clip fills frame)
-        half_w = (self._proj_w / 2) * scale_pct
-        half_h = (self._proj_h / 2) * scale_pct
+        cw, ch = self._proj_w, self._proj_h
+        
+        if clip.clip_type in ["video", "image"] and getattr(clip, "file_path", None) and os.path.exists(clip.file_path):
+            if "media_w" not in props or "media_h" not in props:
+                # Need to lookup dimensions and cache them
+                try:
+                    import cv2
+                    if clip.clip_type == "video":
+                        cap = cv2.VideoCapture(clip.file_path)
+                        if cap.isOpened():
+                            props["media_w"] = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+                            props["media_h"] = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+                        cap.release()
+                    elif clip.clip_type == "image":
+                        img = cv2.imread(clip.file_path, cv2.IMREAD_UNCHANGED)
+                        if img is not None:
+                            props["media_w"] = img.shape[1]
+                            props["media_h"] = img.shape[0]
+                except ImportError:
+                    pass
+            
+            if props.get("media_w", 0) > 0 and props.get("media_h", 0) > 0:
+                mw, mh = props["media_w"], props["media_h"]
+                ratio = min(self._proj_w / mw, self._proj_h / mh)
+                cw = mw * ratio
+                ch = mh * ratio
+                
+        elif clip.clip_type == "caption":
+            font_size = max(1, int(props.get("Font Size", 80)))
+            text = props.get("text", "") or getattr(clip, "file_path", "") or "New Caption"
+            cw = len(text) * font_size * 0.6
+            ch = font_size * 1.5
+            
+        crop_w = props.get("crop_w", 100) / 100.0
+        crop_h = props.get("crop_h", 100) / 100.0
+        
+        cw = max(1.0, cw * crop_w)
+        ch = max(1.0, ch * crop_h)
+
+        half_w = (cw / 2) * scale_pct
+        half_h = (ch / 2) * scale_pct
         
         # Convert to canvas widget coordinates
         render_scale = self._canvas_scale
@@ -127,7 +165,18 @@ class TimelinePreviewCanvas(QWidget):
         hw = half_w * render_scale
         hh = half_h * render_scale
         
-        return QRectF(cx - hw, cy - hh, hw * 2, hh * 2)
+        rotation = props.get("Rotation", 0)
+        
+        return {"cx": cx, "cy": cy, "hw": hw, "hh": hh, "rotation": rotation, "original_scale": scale_pct}
+        
+    def _mouse_to_local(self, pos, cx, cy, rotation):
+        from PySide6.QtGui import QTransform
+        t = QTransform()
+        t.translate(cx, cy)
+        t.rotate(rotation)
+        t_inv, invertible = t.inverted()
+        if not invertible: return pos
+        return t_inv.map(pos)
     
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -151,16 +200,24 @@ class TimelinePreviewCanvas(QWidget):
             if clip and clip.clip_type in ("video", "image", "caption"):
                 bounds = self._get_clip_screen_bounds(clip)
                 if bounds:
+                    cx, cy = bounds["cx"], bounds["cy"]
+                    hw, hh = bounds["hw"], bounds["hh"]
+                    rotation = bounds["rotation"]
+                    
+                    painter.save()
+                    painter.translate(cx, cy)
+                    painter.rotate(rotation)
+                    
                     # Selection box
                     painter.setPen(QPen(QColor("#e66b2c"), 2, Qt.DashLine))
                     painter.setBrush(Qt.NoBrush)
-                    painter.drawRect(bounds.toRect())
+                    painter.drawRect(QRectF(-hw, -hh, hw * 2, hh * 2))
                     
                     # Corner handles
                     handle_size = 8
                     corners = [
-                        bounds.topLeft(), bounds.topRight(),
-                        bounds.bottomLeft(), bounds.bottomRight()
+                        QPointF(-hw, -hh), QPointF(hw, -hh),
+                        QPointF(-hw, hh), QPointF(hw, hh)
                     ]
                     painter.setPen(QPen(QColor("#ffffff"), 1))
                     painter.setBrush(QColor("#e66b2c"))
@@ -168,20 +225,19 @@ class TimelinePreviewCanvas(QWidget):
                         painter.drawRect(QRectF(
                             corner.x() - handle_size/2, corner.y() - handle_size/2,
                             handle_size, handle_size
-                        ).toRect())
+                        ))
                     
                     # Rotation handle (circle above the top center)
-                    top_center = QPointF(bounds.center().x(), bounds.top() - 25)
+                    top_center = QPointF(0, -hh - 25)
                     painter.setPen(QPen(QColor("#ffffff"), 1))
                     painter.setBrush(QColor("#4299e1"))
                     painter.drawEllipse(top_center, 6, 6)
                     
                     # Line from top center of bounds to rotation handle
                     painter.setPen(QPen(QColor("#4299e1"), 1))
-                    painter.drawLine(
-                        int(bounds.center().x()), int(bounds.top()),
-                        int(top_center.x()), int(top_center.y() + 6)
-                    )
+                    painter.drawLine(0, int(-hh), 0, int(top_center.y() + 6))
+                    
+                    painter.restore()
         
         painter.end()
 
@@ -192,22 +248,44 @@ class TimelinePreviewCanvas(QWidget):
                 bounds = self._get_clip_screen_bounds(clip)
                 if bounds:
                     pos = event.position()
+                    local_pos = self._mouse_to_local(pos, bounds["cx"], bounds["cy"], bounds["rotation"])
+                    hw, hh = bounds["hw"], bounds["hh"]
+                    props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
+                    
+                    self._resizing = False
+                    self._dragging = False
+                    self._rotating = False
                     
                     # Check rotation handle (circle above top center)
-                    rot_handle = QPointF(bounds.center().x(), bounds.top() - 25)
-                    if (pos - rot_handle).manhattanLength() < 20:
+                    rot_handle = QPointF(0, -hh - 25)
+                    if (local_pos - rot_handle).manhattanLength() < 20:
                         self._rotating = True
                         self._drag_start = pos
-                        props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
                         self._drag_start_rotation = props.get("Rotation", 0)
                         self.setCursor(Qt.ClosedHandCursor)
                         return
+                        
+                    # Check corner handles
+                    handle_size = 12
+                    corners = [
+                        QPointF(-hw, -hh), QPointF(hw, -hh),
+                        QPointF(-hw, hh), QPointF(hw, hh)
+                    ]
+                    for corner in corners:
+                        if (local_pos - corner).manhattanLength() < handle_size * 2:
+                            self._resizing = True
+                            self._drag_start = pos
+                            self._drag_start_scale = bounds["original_scale"]
+                            
+                            # Original diagonal length from center mapping
+                            self._drag_start_dist = math.sqrt((pos.x() - bounds["cx"])**2 + (pos.y() - bounds["cy"])**2)
+                            return
                     
                     # Check if click is inside bounds (drag to move)
-                    if bounds.contains(pos):
+                    rect = QRectF(-hw, -hh, hw * 2, hh * 2)
+                    if rect.contains(local_pos):
                         self._dragging = True
                         self._drag_start = pos
-                        props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
                         self._drag_start_pos = (props.get("Position_X", 0), props.get("Position_Y", 0))
                         self.setCursor(Qt.ClosedHandCursor)
                         return
@@ -246,16 +324,14 @@ class TimelinePreviewCanvas(QWidget):
             if clip:
                 bounds = self._get_clip_screen_bounds(clip)
                 if bounds:
-                    center = bounds.center()
-                    
                     # Calculate angle from center to current mouse position
-                    dx = event.position().x() - center.x()
-                    dy = event.position().y() - center.y()
+                    dx = event.position().x() - bounds["cx"]
+                    dy = event.position().y() - bounds["cy"]
                     angle = math.degrees(math.atan2(dx, -dy))
                     
                     # Calculate angle from center to start position
-                    dx0 = self._drag_start.x() - center.x()
-                    dy0 = self._drag_start.y() - center.y()
+                    dx0 = self._drag_start.x() - bounds["cx"]
+                    dy0 = self._drag_start.y() - bounds["cy"]
                     start_angle = math.degrees(math.atan2(dx0, -dy0))
                     
                     delta_angle = angle - start_angle
@@ -266,6 +342,23 @@ class TimelinePreviewCanvas(QWidget):
                         self.transform_changed.emit(self._selected_clip_id, "Rotation", new_rotation)
                         self.update()
             return
+
+        elif getattr(self, "_resizing", False) and self._selected_clip_id:
+            clip = self._get_selected_clip_data()
+            if clip:
+                bounds = self._get_clip_screen_bounds(clip)
+                if bounds and self._drag_start_dist > 0:
+                    pos = event.position()
+                    current_dist = math.sqrt((pos.x() - bounds["cx"])**2 + (pos.y() - bounds["cy"])**2)
+                    
+                    ratio = current_dist / self._drag_start_dist
+                    new_scale = max(10, min(400, int(self._drag_start_scale * ratio * 100)))
+                    
+                    if isinstance(clip.applied_effects, dict):
+                        clip.applied_effects["Scale"] = new_scale
+                        self.transform_changed.emit(self._selected_clip_id, "Scale", new_scale)
+                        self.update()
+            return
         
         # Update cursor based on hover
         if self._show_handles and self._selected_clip_id:
@@ -274,11 +367,26 @@ class TimelinePreviewCanvas(QWidget):
                 bounds = self._get_clip_screen_bounds(clip)
                 if bounds:
                     pos = event.position()
-                    rot_handle = QPointF(bounds.center().x(), bounds.top() - 25)
-                    if (pos - rot_handle).manhattanLength() < 20:
+                    local_pos = self._mouse_to_local(pos, bounds["cx"], bounds["cy"], bounds["rotation"])
+                    hw, hh = bounds["hw"], bounds["hh"]
+                    
+                    rot_handle = QPointF(0, -hh - 25)
+                    if (local_pos - rot_handle).manhattanLength() < 20:
                         self.setCursor(Qt.CrossCursor)
                         return
-                    elif bounds.contains(pos):
+                        
+                    handle_size = 12
+                    corners = [
+                        QPointF(-hw, -hh), QPointF(hw, -hh),
+                        QPointF(-hw, hh), QPointF(hw, hh)
+                    ]
+                    for corner in corners:
+                        if (local_pos - corner).manhattanLength() < handle_size * 2:
+                            self.setCursor(Qt.SizeFDiagCursor)
+                            return
+                            
+                    rect = QRectF(-hw, -hh, hw * 2, hh * 2)
+                    if rect.contains(local_pos):
                         self.setCursor(Qt.OpenHandCursor)
                         return
         
@@ -286,9 +394,10 @@ class TimelinePreviewCanvas(QWidget):
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
-        if self._dragging or self._rotating:
+        if self._dragging or self._rotating or getattr(self, "_resizing", False):
             self._dragging = False
             self._rotating = False
+            self._resizing = False
             self.setCursor(Qt.ArrowCursor)
             
             # Trigger a save state on the timeline
@@ -301,7 +410,7 @@ class TimelinePreviewCanvas(QWidget):
                     self._selected_clip_id, "Position_X", clip.applied_effects.get("Position_X", 0)
                 )
                 global_signals.clip_transform_changed.emit(
-                    self._selected_clip_id, "Position_Y", clip.applied_effects.get("Position_Y", 0)
+                    self._selected_clip_id, "Scale", clip.applied_effects.get("Scale", 100)
                 )
             return
         
