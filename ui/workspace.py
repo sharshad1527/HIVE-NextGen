@@ -102,7 +102,7 @@ class DraggableCard(QFrame):
     card_clicked = Signal(object, object)
     folder_double_clicked = Signal(str)
 
-    def __init__(self, title, icon_name, item_type, subtype="", file_path="", thumbnail=None):
+    def __init__(self, title, icon_name, item_type, subtype="", file_path="", thumbnail=None, duration=0.0):
         super().__init__()
         self.title = title
         self.item_type = item_type
@@ -110,7 +110,9 @@ class DraggableCard(QFrame):
         self.file_path = file_path
         self.thumbnail_path = thumbnail
         self.proxy_path = "" 
-        self.parent_folder = None 
+        self.parent_folder = None
+        self.duration = duration  # seconds — used by timeline for clip width
+
         
         self.setFixedSize(145, 120) 
         self.setCursor(Qt.PointingHandCursor)
@@ -194,12 +196,13 @@ class DraggableCard(QFrame):
 
     def get_data(self):
         return {
-            "title": self.title, 
-            "type": self.item_type, 
+            "title": self.title,
+            "type": self.item_type,
             "subtype": self.subtype,
             "file_path": self.file_path,
             "proxy_path": self.proxy_path,
-            "thumbnail": self.thumbnail_path
+            "thumbnail": self.thumbnail_path,
+            "duration": self.duration,  # Pre-computed; avoids cv2 on main thread
         }
 
     def get_selected_siblings(self):
@@ -884,7 +887,8 @@ class WorkspacePanel(QFrame):
             item_type="media",
             subtype=media_info["type"],
             file_path=final_path,
-            thumbnail=media_info["thumbnail"]
+            thumbnail=media_info["thumbnail"],
+            duration=media_info.get("duration", 0.0),
         )
         card.date_added = os.path.getmtime(final_path) if os.path.exists(final_path) else 0
         card.parent_folder = parent_folder.replace('\\', '/') if parent_folder else None

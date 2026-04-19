@@ -3,15 +3,20 @@
     "icon": "mdi6.format-color-highlight",
     "category": "captions",
     "properties": {
-        "font_family": {"type": "font", "default": "Inter"},
-        "font_size": {"type": "slider", "min": 10, "max": 200, "default": 52, "suffix": ""},
-        "text_color": {"type": "color", "default": "#FFFFFF"},
-        "highlight_color": {"type": "color", "default": "#FFD700"},
-        "highlight_opacity": {"type": "slider", "min": 0, "max": 100, "default": 80, "suffix": "%"},
-        "position_y": {"type": "slider", "min": -500, "max": 500, "default": 350, "suffix": "px"},
+        "Font Family": {"type": "font", "default": "Inter"},
+        "Font Size": {"type": "slider", "min": 10, "max": 200, "default": 52, "suffix": "px"},
+        "Text Color": {"type": "color", "default": "#FFFFFF"},
+        "Bg Color": {"type": "color", "default": "#FFD700"},
+        "bg_opacity": {"type": "slider", "min": 0, "max": 100, "default": 80, "suffix": "%"},
+        "bg_radius": {"type": "slider", "min": 0, "max": 50, "default": 6, "suffix": "px"},
+        "bg_padding": {"type": "slider", "min": 0, "max": 50, "default": 8, "suffix": "px"},
         "outline_width": {"type": "slider", "min": 0, "max": 10, "default": 3, "suffix": "px"},
         "outline_color": {"type": "color", "default": "#000000"},
-        "shadow_offset": {"type": "slider", "min": 0, "max": 20, "default": 4, "suffix": "px"}
+        "max_chars_per_line": {"type": "slider", "min": 5, "max": 80, "default": 35},
+        "max_lines": {"type": "slider", "min": 1, "max": 8, "default": 2},
+        "word_wrap": {"type": "checkbox", "default": true},
+        "text_align": {"type": "combo", "options": ["Left", "Center", "Right"], "default": "Center"},
+        "font_weight": {"type": "combo", "options": ["Regular", "Bold", "Light", "Black"], "default": "Bold"}
     },
     "controls_schema": [
         {
@@ -26,9 +31,16 @@
                 {"key": "Font Family", "type": "font", "default": "Inter", "label": "Font"},
                 {"key": "Font Size", "type": "slider", "min": 8, "max": 300, "default": 52, "suffix": "px", "label": "Size"},
                 {"key": "font_weight", "type": "combo", "options": ["Regular", "Bold", "Light", "Black"], "default": "Bold", "label": "Weight"},
-                {"key": "Text Color", "type": "color", "default": "#FFFFFF", "label": "Text Color"},
-                {"key": "highlight_color", "type": "color", "default": "#FFD700", "label": "Highlight"},
-                {"key": "highlight_opacity", "type": "slider", "min": 0, "max": 100, "default": 80, "suffix": "%", "label": "Highlight Opacity"}
+                {"key": "Text Color", "type": "color", "default": "#FFFFFF", "label": "Text Color"}
+            ]
+        },
+        {
+            "section": "Highlight Background",
+            "controls": [
+                {"key": "Bg Color", "type": "color", "default": "#FFD700", "label": "Highlight Color"},
+                {"key": "bg_opacity", "type": "slider", "min": 0, "max": 100, "default": 80, "suffix": "%", "label": "Highlight Opacity"},
+                {"key": "bg_radius", "type": "slider", "min": 0, "max": 50, "default": 6, "suffix": "px", "label": "Corner Radius"},
+                {"key": "bg_padding", "type": "slider", "min": 0, "max": 50, "default": 8, "suffix": "px", "label": "Padding"}
             ]
         },
         {
@@ -41,11 +53,10 @@
             ]
         },
         {
-            "section": "Outline & Shadow",
+            "section": "Outline",
             "controls": [
                 {"key": "outline_width", "type": "slider", "min": 0, "max": 15, "default": 3, "suffix": "px", "label": "Outline"},
-                {"key": "outline_color", "type": "color", "default": "#000000", "label": "Outline Color"},
-                {"key": "shadow_offset", "type": "slider", "min": 0, "max": 20, "default": 4, "suffix": "px", "label": "Shadow"}
+                {"key": "outline_color", "type": "color", "default": "#000000", "label": "Outline Color"}
             ]
         },
         {

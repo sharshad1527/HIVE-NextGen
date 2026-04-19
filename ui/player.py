@@ -604,6 +604,15 @@ class PlayerPanel(QFrame):
 
     def load_preview(self, media_data):
         self.current_preview_data = media_data
+        if not media_data:
+            if hasattr(self.render_engine, 'set_preview_preset'):
+                self.render_engine.set_preview_preset(None)
+            self.is_preview_mode = False
+            self.is_timeline_preview = False
+            if self.is_playing:
+                self.toggle_play()
+            return
+
         preset_type = media_data.get("type")
         
         # Context-Aware Timeline Previewing for Presets
@@ -612,6 +621,7 @@ class PlayerPanel(QFrame):
             self.is_timeline_preview = True
             self.preview_duration = 4500  # 4.5 seconds loop limit
             self.preview_position = 0
+            self.preview_loops = 0
             
             if preset_type == "transition" and hasattr(self, "timeline_canvas") and getattr(self, "timeline_canvas", None):
                 clip = None
@@ -633,7 +643,7 @@ class PlayerPanel(QFrame):
             self.playback_start_playhead = self.playhead
             
             if hasattr(self.render_engine, 'set_preview_preset'):
-                self.render_engine.set_preview_preset(media_data)
+                self.render_engine.set_preview_preset(media_data, target_clip_id=clip.clip_id if 'clip' in locals() and clip else None)
                 
             self.player.stop()
             self.media_stack.setCurrentWidget(self.timeline_canvas)
@@ -759,24 +769,57 @@ class PlayerPanel(QFrame):
                     if clip.start_time <= current_ms < clip.end_time:
                         active_clip_ids.add(clip.clip_id)
                         
+                        props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
+                        
                         trim_in_ms = getattr(clip, 'trim_in', 0)
-                        if isinstance(clip.applied_effects, dict):
-                            fx_source_in = clip.applied_effects.get("source_in", 0) * 10
-                            trim_in_ms = max(trim_in_ms, fx_source_in)
-                            
+                        fx_source_in = props.get("source_in", 0) * 10
+                        trim_in_ms = max(trim_in_ms, fx_source_in)
                         local_ms = (current_ms - clip.start_time) + trim_in_ms
+                        
+                        # --- Volume (% → linear) ---
+                        vol_pct = props.get("Volume", 100)
+                        linear_vol = max(0.0, float(vol_pct) / 100.0)
+                        
+                        # --- Fade In / Fade Out ---
+                        clip_duration_ms = clip.end_time - clip.start_time
+                        elapsed_ms = current_ms - clip.start_time
+                        fade_in_sec = float(props.get("Fade_In", 0))
+                        fade_out_sec = float(props.get("Fade_Out", 0))
+                        
+                        fade_in_ms = fade_in_sec * 1000.0
+                        fade_out_ms = fade_out_sec * 1000.0
+                        
+                        fade_mult = 1.0
+                        if fade_in_ms > 0 and elapsed_ms < fade_in_ms:
+                            fade_mult = min(1.0, elapsed_ms / fade_in_ms)
+                        if fade_out_ms > 0:
+                            remaining_ms = clip.end_time - current_ms
+                            if remaining_ms < fade_out_ms:
+                                fade_mult *= min(1.0, remaining_ms / fade_out_ms)
+                        
+                        effective_vol = linear_vol * fade_mult
+                        
+                        # --- Pan (-100 left … +100 right) ---
+                        pan = float(props.get("Pan", 0)) / 100.0  # -1.0 … 1.0
+                        left_vol = effective_vol * max(0.0, 1.0 - pan)
+                        right_vol = effective_vol * max(0.0, 1.0 + pan)
+                        # Normalize so that center pan doesn't boost above 1.0
+                        if pan != 0:
+                            left_vol = min(1.0, left_vol)
+                            right_vol = min(1.0, right_vol)
+                        
+                        # --- Speed / Playback Rate ---
+                        speed_pct = float(props.get("Speed", 100))
+                        playback_rate = max(0.1, min(4.0, speed_pct / 100.0))
                         
                         if clip.clip_id not in self.audio_players:
                             player = QMediaPlayer()
                             audio_output = QAudioOutput()
-                            
-                            vol_db = clip.applied_effects.get("Volume", 0) if isinstance(clip.applied_effects, dict) else 0
-                            linear_vol = max(0.0, min(1.0, math.pow(10, vol_db / 20.0)))
-                            audio_output.setVolume(linear_vol)
-                            
+                            audio_output.setVolume(effective_vol)
                             player.setAudioOutput(audio_output)
                             player.setSource(QUrl.fromLocalFile(clip.file_path))
                             player.setPosition(local_ms)
+                            player.setPlaybackRate(playback_rate)
                             
                             if self.is_playing:
                                 player.play()
@@ -784,6 +827,15 @@ class PlayerPanel(QFrame):
                             self.audio_players[clip.clip_id] = {'player': player, 'output': audio_output}
                         else:
                             player = self.audio_players[clip.clip_id]['player']
+                            audio_output = self.audio_players[clip.clip_id]['output']
+                            
+                            # Update volume/fade live
+                            audio_output.setVolume(effective_vol)
+                            
+                            # Update playback rate live
+                            if abs(player.playbackRate() - playback_rate) > 0.01:
+                                player.setPlaybackRate(playback_rate)
+                            
                             if self.is_playing and player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
                                 player.play()
                             elif not self.is_playing and player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
@@ -804,6 +856,7 @@ class PlayerPanel(QFrame):
             self.audio_players[clip_id]['output'].deleteLater()
             del self.audio_players[clip_id]
 
+
     def _stop_all_timeline_audio(self):
         for clip_id, data in self.audio_players.items():
             data['player'].pause()
@@ -817,24 +870,36 @@ class PlayerPanel(QFrame):
         new_pos = self.playback_start_playhead + (elapsed * 100.0)
         
         if self.is_timeline_preview:
-            # Elegantly stop the contextual preset preview after 4.5 seconds to avoid infinite loops
             if elapsed > 4.5: 
-                self.toggle_play()
-                self.is_preview_mode = False
-                self.is_timeline_preview = False
-                if hasattr(self.render_engine, 'set_preview_preset'):
-                    self.render_engine.set_preview_preset(None)
-                self.render_engine.request_frame(int(self.playhead))
+                if not hasattr(self, 'preview_loops'):
+                    self.preview_loops = 0
+                self.preview_loops += 1
+                
+                if self.preview_loops >= 3:
+                    self.is_preview_mode = False
+                    self.is_timeline_preview = False
+                    self.preview_loops = 0
+                    if hasattr(self.render_engine, 'set_preview_preset'):
+                        self.render_engine.set_preview_preset(None)
+                    if self.is_playing:
+                        self.toggle_play()
+                    self.render_engine.request_frame(int(self.playhead))
+                else:
+                    self.playback_start_time = time.time()
             else:
-                self.preview_position = (new_pos - self.playback_start_playhead) * 10
-                self._update_timecode_label(preview=True)
-                self.render_engine.request_frame(int(new_pos))
+                self.playhead = new_pos
+                self._update_timecode_label(preview=False)
+                self.playhead_seek_requested.emit(int(self.playhead))
+                self.render_engine.request_frame(int(self.playhead))
+                self._sync_timeline_audio(int(self.playhead))
             return
         
         if new_pos >= self.duration and self.duration > 0:
             new_pos = self.duration
-            self.toggle_play() 
+            if self.is_playing:
+                self.toggle_play() 
             
+        self.playhead = new_pos
         self.render_engine.request_frame(int(new_pos))
         self.playhead_seek_requested.emit(int(new_pos))
         self._sync_timeline_audio(int(new_pos))

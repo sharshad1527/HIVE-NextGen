@@ -173,15 +173,19 @@ DEFAULT_SCHEMAS = {
             ]
         },
         {
-            "section": "Time & Playback",
+            "section": "Playback",
             "controls": [
                 {"key": "Speed", "type": "slider", "min": 10, "max": 500, "default": 100, "suffix": "%", "label": "Speed"},
+                {"key": "reverse", "type": "checkbox", "default": False, "label": "Reverse Playback"},
+                {"key": "mirror", "type": "checkbox", "default": False, "label": "Mirror (Flip H)"},
             ]
         },
         {
             "section": "Audio",
             "controls": [
-                {"key": "Volume", "type": "slider", "min": -60, "max": 12, "default": 0, "suffix": "dB", "label": "Volume"},
+                {"key": "Volume", "type": "slider", "min": 0, "max": 200, "default": 100, "suffix": "%", "label": "Volume"},
+                {"key": "Fade_In", "type": "float_spin", "min": 0.0, "max": 30.0, "default": 0.0, "step": 0.1, "suffix": "s", "label": "Fade In"},
+                {"key": "Fade_Out", "type": "float_spin", "min": 0.0, "max": 30.0, "default": 0.0, "step": 0.1, "suffix": "s", "label": "Fade Out"},
             ]
         },
     ],
@@ -199,8 +203,11 @@ DEFAULT_SCHEMAS = {
         {
             "section": "Style",
             "controls": [
-                {"key": "Blend_Mode", "type": "combo", "options": ["Normal", "Multiply", "Screen", "Overlay", "Darken", "Lighten"], "default": "Normal", "label": "Blend Mode"},
+                {"key": "Blend_Mode", "type": "combo",
+                 "options": ["Normal", "Multiply", "Screen", "Overlay", "Darken", "Lighten", "Add", "Difference", "Exclusion"],
+                 "default": "Normal", "label": "Blend Mode"},
                 {"key": "Corner_Radius", "type": "slider", "min": 0, "max": 200, "default": 0, "suffix": "px", "label": "Corner Radius"},
+                {"key": "mirror", "type": "checkbox", "default": False, "label": "Mirror (Flip H)"},
             ]
         },
     ],
@@ -209,22 +216,22 @@ DEFAULT_SCHEMAS = {
         {
             "section": "Mixer",
             "controls": [
-                {"key": "Volume", "type": "slider", "min": -60, "max": 12, "default": 0, "suffix": "dB", "label": "Volume"},
-                {"key": "Pan", "type": "slider", "min": -100, "max": 100, "default": 0, "label": "Pan"},
+                {"key": "Volume", "type": "slider", "min": 0, "max": 200, "default": 100, "suffix": "%", "label": "Volume"},
+                {"key": "Pan", "type": "slider", "min": -100, "max": 100, "default": 0, "suffix": "", "label": "Pan  ◀ L  R ▶"},
             ]
         },
         {
             "section": "Fades",
             "controls": [
-                {"key": "Fade_In", "type": "slider", "min": 0, "max": 100, "default": 0, "suffix": "s", "label": "Fade In"},
-                {"key": "Fade_Out", "type": "slider", "min": 0, "max": 100, "default": 0, "suffix": "s", "label": "Fade Out"},
+                {"key": "Fade_In", "type": "float_spin", "min": 0.0, "max": 60.0, "default": 0.0, "step": 0.1, "suffix": "s", "label": "Fade In"},
+                {"key": "Fade_Out", "type": "float_spin", "min": 0.0, "max": 60.0, "default": 0.0, "step": 0.1, "suffix": "s", "label": "Fade Out"},
             ]
         },
         {
-            "section": "Time",
+            "section": "Time & Pitch",
             "controls": [
                 {"key": "Speed", "type": "slider", "min": 10, "max": 400, "default": 100, "suffix": "%", "label": "Speed"},
-                {"key": "Pitch", "type": "slider", "min": -12, "max": 12, "default": 0, "suffix": "st", "label": "Pitch"},
+                {"key": "Pitch", "type": "slider", "min": -12, "max": 12, "default": 0, "suffix": " st", "label": "Pitch (semitones)"},
             ]
         },
     ],

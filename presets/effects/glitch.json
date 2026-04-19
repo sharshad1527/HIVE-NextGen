@@ -3,8 +3,18 @@
     "icon": "mdi6.flash-outline",
     "category": "effects",
     "properties": {
-        "intensity": {"type": "slider", "min": 0, "max": 100, "default": 50, "suffix": "%"},
+        "effect_amount": {"type": "slider", "min": 0, "max": 100, "default": 50, "suffix": "%"},
         "block_size": {"type": "slider", "min": 2, "max": 50, "default": 10, "suffix": "px"},
         "shift_amount": {"type": "slider", "min": 0, "max": 100, "default": 20, "suffix": "px"}
-    }
+    },
+    "controls_schema": [
+        {
+            "section": "Glitch",
+            "controls": [
+                {"key": "effect_amount", "type": "slider", "min": 0, "max": 100, "default": 50, "suffix": "%", "label": "Intensity"},
+                {"key": "block_size", "type": "slider", "min": 2, "max": 50, "default": 10, "suffix": "px", "label": "Block Size"},
+                {"key": "shift_amount", "type": "slider", "min": 0, "max": 100, "default": 20, "suffix": "px", "label": "Shift Amount"}
+            ]
+        }
+    ]
 }

@@ -3,8 +3,20 @@
     "icon": "mdi6.transition",
     "category": "transitions",
     "properties": {
-        "duration": {"type": "slider", "min": 5, "max": 60, "default": 15, "suffix": " frames"},
+        "transition_in_duration_sec": {"type": "float_spin", "min": 0.1, "max": 8.0, "default": 0.5, "step": 0.1},
+        "transition_out_duration_sec": {"type": "float_spin", "min": 0.1, "max": 8.0, "default": 0.5, "step": 0.1},
         "color": {"type": "color", "default": "#000000"},
         "easing": {"type": "combo", "options": ["Linear", "Ease In", "Ease Out", "Ease In-Out"], "default": "Ease In-Out"}
-    }
+    },
+    "controls_schema": [
+        {
+            "section": "Dip to Black",
+            "controls": [
+                {"key": "transition_in_duration_sec", "type": "float_spin", "min": 0.1, "max": 8.0, "default": 0.5, "step": 0.1, "suffix": "s", "label": "In Duration"},
+                {"key": "transition_out_duration_sec", "type": "float_spin", "min": 0.1, "max": 8.0, "default": 0.5, "step": 0.1, "suffix": "s", "label": "Out Duration"},
+                {"key": "color", "type": "color", "default": "#000000", "label": "Dip Color"},
+                {"key": "easing", "type": "combo", "options": ["Linear", "Ease In", "Ease Out", "Ease In-Out"], "default": "Ease In-Out", "label": "Easing"}
+            ]
+        }
+    ]
 }

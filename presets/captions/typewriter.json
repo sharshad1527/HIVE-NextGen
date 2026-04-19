@@ -3,12 +3,17 @@
     "icon": "mdi6.typewriter",
     "category": "captions",
     "properties": {
-        "font_family": {"type": "font", "default": "Courier New"},
-        "font_size": {"type": "slider", "min": 10, "max": 200, "default": 44, "suffix": ""},
-        "text_color": {"type": "color", "default": "#00FF88"},
-        "bg_color": {"type": "color", "default": "#0a0a0a"},
+        "Font Family": {"type": "font", "default": "Courier New"},
+        "Font Size": {"type": "slider", "min": 10, "max": 200, "default": 44, "suffix": "px"},
+        "Text Color": {"type": "color", "default": "#00FF88"},
+        "Bg Color": {"type": "color", "default": "#0a0a0a"},
         "bg_opacity": {"type": "slider", "min": 0, "max": 100, "default": 80, "suffix": "%"},
-        "outline_width": {"type": "slider", "min": 0, "max": 10, "default": 0, "suffix": "px"}
+        "outline_width": {"type": "slider", "min": 0, "max": 10, "default": 0, "suffix": "px"},
+        "max_chars_per_line": {"type": "slider", "min": 5, "max": 80, "default": 50},
+        "max_lines": {"type": "slider", "min": 1, "max": 8, "default": 3},
+        "word_wrap": {"type": "checkbox", "default": true},
+        "text_align": {"type": "combo", "options": ["Left", "Center", "Right"], "default": "Left"},
+        "font_weight": {"type": "combo", "options": ["Regular", "Bold", "Light"], "default": "Regular"}
     },
     "controls_schema": [
         {

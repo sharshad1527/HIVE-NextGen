@@ -341,10 +341,11 @@ class TracksCanvas(QWidget):
     def update_item_property(self, item_id, prop_name, new_value, save_state=True):
         if prop_name == "apply_transition_to_all":
             track_id = new_value.get("track")
+            if track_id != "video_1": return
             trans_name = new_value.get("transition")
             trans_dur = int(app_config.get_setting("default_transition_duration", 1.0) * 30)
             for item in self.items:
-                if item["track"] == track_id and item["type"] in ["video", "image"]:
+                if item["track"] == track_id and item["type"] in ["video", "image"] and not self.is_track_locked(item["track"]):
                     item["transition_in"] = trans_name
                     item["transition_in_duration"] = trans_dur
                     item["transition_out"] = trans_name
@@ -353,9 +354,40 @@ class TracksCanvas(QWidget):
             if save_state:
                 self.save_state()
             return
+
+        # --- TRANSITION DURATION BUG FIX ---
+        if prop_name == "transition_in_duration_sec":
+            frames = max(1, int(float(new_value) * 30))
+            for item in self.items:
+                if item["id"] == item_id and not self.is_track_locked(item["track"]):
+                    item["transition_in_duration_sec"] = new_value
+                    item["transition_in_duration"] = frames
+                    self.update()
+                    break
+            self.save_state()
+            global_signals.clip_transform_changed.emit(item_id, "transition_in_duration", frames)
+            return
+
+        if prop_name == "transition_out_duration_sec":
+            frames = max(1, int(float(new_value) * 30))
+            for item in self.items:
+                if item["id"] == item_id and not self.is_track_locked(item["track"]):
+                    item["transition_out_duration_sec"] = new_value
+                    item["transition_out_duration"] = frames
+                    self.update()
+                    break
+            self.save_state()
+            global_signals.clip_transform_changed.emit(item_id, "transition_out_duration", frames)
+            return
             
         for item in self.items:
             if item["id"] == item_id:
+                if self.is_track_locked(item["track"]): return
+                if prop_name == "Speed":
+                    actual_speed = max(0.1, float(new_value))
+                    item["w"] = item.get("max_w", item["w"]) / (actual_speed / 100.0)
+                    self._apply_magnetic_v1()
+                    self.update_max_width()
                 item[prop_name] = new_value
                 self.update()
                 break
@@ -363,10 +395,8 @@ class TracksCanvas(QWidget):
         if save_state:
             self.save_state()
         else:
-            # Always sync so the render engine sees changes immediately (preview refresh fix)
             self.sync_to_project()
         
-        # Force the preview player to re-render with the updated property
         global_signals.clip_transform_changed.emit(item_id, prop_name, new_value)
 
     # --- DRAG AND DROP ---
@@ -414,7 +444,7 @@ class TracksCanvas(QWidget):
                     break
 
         if drop_type == "transition":
-            if hovered_clip and hovered_clip["type"] in ["video", "image"]:
+            if hovered_clip and hovered_clip["type"] in ["video", "image"] and hovered_clip["track"] == "video_1":
                 ix = hovered_clip["x"] * z
                 iw = hovered_clip["w"] * z
                 dist_left = abs(pos.x() - ix)
@@ -553,14 +583,18 @@ class TracksCanvas(QWidget):
             if drop_type == "transition" and self._drop_target_type == "transition":
                 item = next((i for i in self.items if i["id"] == self._drop_target_item), None)
                 if item:
-                    trans_dur_frames = int(app_config.get_setting("default_transition_duration", 1.0) * 30)
-    
+                    dur_sec = float(app_config.get_setting("default_transition_duration", 1.0))
+                    trans_dur_frames = max(1, int(dur_sec * 30))
+
                     if getattr(self, "_drop_target_edge", "left") == "left":
+                        # SINGLE-TRANSITION ENFORCEMENT: always replace, never stack
                         item["transition_in"] = title
                         item["transition_in_duration"] = trans_dur_frames
+                        item["transition_in_duration_sec"] = dur_sec
                     else:
                         item["transition_out"] = title
                         item["transition_out_duration"] = trans_dur_frames
+                        item["transition_out_duration_sec"] = dur_sec
                     self.save_state()
                     self._emit_selection_state()
                     
@@ -619,41 +653,23 @@ class TracksCanvas(QWidget):
                 item_w = 1000
                 max_w = float('inf')
                 
-                if data.get("duration"):
-                    item_w = int(float(data.get("duration")) * 100)
-                    if subtype in ["video", "audio"]: max_w = item_w
+                # FREEZE BUG FIX: duration is now stored in the media_info dict by the
+                # background MediaLoaderThread (via media_manager.process_file) — we never
+                # call cv2.VideoCapture on the main thread here anymore.
+                if data.get("duration") and float(data["duration"]) > 0:
+                    duration_sec = float(data["duration"])
+                    item_w = int(duration_sec * 100)
+                    if subtype in ["video", "audio"]:
+                        max_w = item_w
                 elif drop_type == "caption":
                     item_w = 400
                 elif drop_type == "effect":
                     item_w = 1500
                 elif subtype == "image":
                     item_w = int(app_config.get_setting("default_image_duration", 5.0) * 100)
-                elif subtype in ["video", "audio"] and file_path:
-                    duration_sec = 0
-                    # 1. Try native wave module for flawless .wav parsing
-                    if file_path.lower().endswith('.wav'):
-                        try:
-                            import wave
-                            with wave.open(file_path, 'rb') as w_file:
-                                duration_sec = w_file.getnframes() / float(w_file.getframerate())
-                        except Exception:
-                            pass
-                    
-                    # 2. Try OpenCV FFmpeg backend for .mp3, .m4a, and .mp4 videos
-                    if duration_sec <= 0 and CV2_AVAILABLE:
-                        try:
-                            cap = cv2.VideoCapture(file_path)
-                            fps = cap.get(cv2.CAP_PROP_FPS)
-                            frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                            if fps > 0:
-                                duration_sec = frames / fps
-                            cap.release()
-                        except Exception:
-                            pass
-                            
-                    if duration_sec > 0:
-                        item_w = int(duration_sec * 100)
-                        max_w = item_w
+                # If duration is still 0 for media (ffmpeg failed), use a safe 10s fallback
+                elif subtype in ["video", "audio"]:
+                    item_w = 1000  # 10 seconds fallback
     
                 new_item = {
                     "id": f"{drop_type}_{random.randint(10000, 99999)}",
@@ -733,7 +749,12 @@ class TracksCanvas(QWidget):
     def save_state(self):
         """Pushes current visual layout to undo history, and signals the UI that a change happened."""
         self.history = self.history[:self.history_idx + 1]
-        self.history.append(copy.deepcopy(self.items))
+        state = {
+            "items": copy.deepcopy(self.items),
+            "track_defs": copy.deepcopy(self.track_defs),
+            "track_states": copy.deepcopy(self.track_states)
+        }
+        self.history.append(state)
         self.history_idx += 1
         
         # CRITICAL FIX: Force the UI to push its layout to the Engine's Backend Brain immediately!
@@ -771,39 +792,21 @@ class TracksCanvas(QWidget):
             item_w = 1000
             max_w = float('inf')
             
-            if data.get("duration"):
-                item_w = int(float(data.get("duration")) * 100)
-                if subtype in ["video", "audio"]: max_w = item_w
+            # FREEZE BUG FIX: read pre-computed duration from media_manager dict.
+            # cv2.VideoCapture is NO LONGER called on the main thread.
+            if data.get("duration") and float(data["duration"]) > 0:
+                duration_sec = float(data["duration"])
+                item_w = int(duration_sec * 100)
+                if subtype in ["video", "audio"]:
+                    max_w = item_w
             elif drop_type == "caption":
                 item_w = 400
             elif drop_type == "effect":
                 item_w = 1500
             elif subtype == "image":
                 item_w = int(app_config.get_setting("default_image_duration", 5.0) * 100)
-            elif subtype in ["video", "audio"] and file_path:
-                duration_sec = 0
-                if file_path.lower().endswith('.wav'):
-                    try:
-                        import wave
-                        with wave.open(file_path, 'rb') as w_file:
-                            duration_sec = w_file.getnframes() / float(w_file.getframerate())
-                    except Exception:
-                        pass
-                
-                if duration_sec <= 0 and CV2_AVAILABLE:
-                    try:
-                        cap = cv2.VideoCapture(file_path)
-                        fps = cap.get(cv2.CAP_PROP_FPS)
-                        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                        if fps > 0:
-                            duration_sec = frames / fps
-                        cap.release()
-                    except Exception:
-                        pass
-                        
-                if duration_sec > 0:
-                    item_w = int(duration_sec * 100)
-                    max_w = item_w
+            elif subtype in ["video", "audio"]:
+                item_w = 1000  # 10-second safe fallback if duration not available
 
             new_item = {
                 "id": f"{drop_type}_{random.randint(10000, 99999)}",
@@ -845,25 +848,37 @@ class TracksCanvas(QWidget):
     def undo(self):
         if self.history_idx > 0:
             self.history_idx -= 1
-            self.items = copy.deepcopy(self.history[self.history_idx])
+            state = self.history[self.history_idx]
+            self.items = copy.deepcopy(state.get("items", []))
+            self.track_defs = copy.deepcopy(state.get("track_defs", []))
+            self.track_states = copy.deepcopy(state.get("track_states", {}))
+            
             current_ids = {i["id"] for i in self.items}
             self.selected_ids = {sid for sid in self.selected_ids if sid in current_ids}
             self._emit_selection_state()
             self._apply_magnetic_v1()
             self.update_max_width()
+            self.tracks_changed.emit()
             self.state_changed.emit()
+            self.sync_to_project()
             self.update()
 
     def redo(self):
         if self.history_idx < len(self.history) - 1:
             self.history_idx += 1
-            self.items = copy.deepcopy(self.history[self.history_idx])
+            state = self.history[self.history_idx]
+            self.items = copy.deepcopy(state.get("items", []))
+            self.track_defs = copy.deepcopy(state.get("track_defs", []))
+            self.track_states = copy.deepcopy(state.get("track_states", {}))
+            
             current_ids = {i["id"] for i in self.items}
             self.selected_ids = {sid for sid in self.selected_ids if sid in current_ids}
             self._emit_selection_state()
             self._apply_magnetic_v1()
             self.update_max_width()
+            self.tracks_changed.emit()
             self.state_changed.emit()
+            self.sync_to_project()
             self.update()
             
     def freeze_frame_at_playhead(self):
@@ -998,15 +1013,25 @@ class TracksCanvas(QWidget):
             self.update_max_width()
             self.update()
 
-    def toggle_item_property(self, prop_name):
+    def toggle_item_property(self, prop_name, **kwargs):
         changed = False
         for s_id in list(self.selected_ids):
             item = next((i for i in self.items if i["id"] == s_id), None)
-            if item and item["type"] in ["video", "image"]:
-                item[prop_name] = not item.get(prop_name, False)
+            if item and item["type"] in ["video", "image"] and not self.is_track_locked(item["track"]):
+                if prop_name == "rotate":
+                    item["Rotation"] = (item.get("Rotation", 0) + 90) % 360
+                    self._on_external_transform(s_id, "Rotation", item["Rotation"])
+                else:
+                    item[prop_name] = not item.get(prop_name, False)
+                    for k, v in kwargs.items():
+                        if k == "mute_audio" and v:
+                            item["Volume"] = -100
+                        else:
+                            item[k] = v
                 changed = True
         if changed:
             self.save_state()
+            self.sync_to_project()
             self._emit_selection_state()
             self.update()
 
@@ -1698,7 +1723,11 @@ class TracksCanvas(QWidget):
                         new_w += shift_x
                         self.snap_line_x = snap_x
                         
-                item["w"] = max(10, min(new_w, item.get("max_w", float('inf'))))
+                speed_pct = float(item.get("Speed", 100)) / 100.0
+                actual_max_w = item.get("max_w", float('inf'))
+                if actual_max_w != float('inf'):
+                    actual_max_w = actual_max_w / speed_pct
+                item["w"] = max(10, min(new_w, actual_max_w))
             elif self.resize_edge == "left":
                 max_left_x = item["x"] + item["w"] - 10
                 new_x = min(logical_x, max_left_x)
@@ -1708,8 +1737,11 @@ class TracksCanvas(QWidget):
                         new_x += shift_x
                         self.snap_line_x = snap_x
                 
-                if item.get("max_w", float('inf')) != float('inf'):
-                    min_x = (item["x"] + item["w"]) - item["max_w"]
+                speed_pct = float(item.get("Speed", 100)) / 100.0
+                actual_max_w = item.get("max_w", float('inf'))
+                if actual_max_w != float('inf'):
+                    actual_max_w = actual_max_w / speed_pct
+                    min_x = (item["x"] + item["w"]) - actual_max_w
                     new_x = max(new_x, min_x)
                 right_edge = item["x"] + item["w"]
                 diff = new_x - item["x"]
@@ -2069,6 +2101,8 @@ class TracksCanvas(QWidget):
                             
                             sample_idx = int((source_in + logical_offset) * samples_per_logical)
                             val = wave_data[sample_idx] if 0 <= sample_idx < len(wave_data) else 0
+                            volume_pct = float(item.get("Volume", 100)) / 100.0
+                            val *= volume_pct
                                 
                             h = (val / 100.0) * max_wave_h
                             safe_h = max(2, min(h, max_wave_h))
@@ -2131,17 +2165,20 @@ class TracksCanvas(QWidget):
                         sample_idx = int((source_in + logical_offset) * samples_per_logical)
                         
                         val = wave_data[sample_idx] if 0 <= sample_idx < len(wave_data) else 0
+                        volume_pct = float(item.get("Volume", 100)) / 100.0
+                        val *= volume_pct
                             
                         h = (val / 100.0) * max_wave_h
                         safe_h = max(2, min(h, max_wave_h))
                         painter.drawLine(hx, int(base_y - safe_h/2), hx, int(base_y + safe_h/2))
                 else:
                     # Fallback dummy wave while loading safely to prevent visual pops
+                    volume_pct = float(item.get("Volume", 100)) / 100.0
                     for i in range(start_i, end_i):
                         logical_w_pos = item["x"] + (i * logical_step)
                         hx = int(logical_w_pos * z)
                         wave_idx = int(logical_w_pos) % len(self.audio_waveforms)
-                        h = self.audio_waveforms[wave_idx] 
+                        h = self.audio_waveforms[wave_idx] * volume_pct 
                         safe_h = min(h, max_wave_h) 
                         painter.drawLine(hx, int(base_y - safe_h/2), hx, int(base_y + safe_h/2))
 

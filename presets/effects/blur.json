@@ -3,7 +3,14 @@
     "icon": "mdi6.blur",
     "category": "effects",
     "properties": {
-        "intensity": {"type": "slider", "min": 0, "max": 100, "default": 50, "suffix": "%"},
-        "radius": {"type": "slider", "min": 1, "max": 100, "default": 15, "suffix": "px"}
-    }
+        "effect_amount": {"type": "slider", "min": 0, "max": 100, "default": 50, "suffix": "%"}
+    },
+    "controls_schema": [
+        {
+            "section": "Blur",
+            "controls": [
+                {"key": "effect_amount", "type": "slider", "min": 0, "max": 100, "default": 50, "suffix": "%", "label": "Intensity"}
+            ]
+        }
+    ]
 }

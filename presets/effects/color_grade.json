@@ -3,10 +3,22 @@
     "icon": "mdi6.palette-outline",
     "category": "effects",
     "properties": {
-        "brightness": {"type": "slider", "min": -100, "max": 100, "default": 0, "suffix": ""},
-        "contrast": {"type": "slider", "min": -100, "max": 100, "default": 10, "suffix": ""},
-        "saturation": {"type": "slider", "min": -100, "max": 100, "default": 15, "suffix": ""},
-        "temperature": {"type": "slider", "min": -100, "max": 100, "default": 0, "suffix": ""},
-        "tint": {"type": "color", "default": "#FFFFFF"}
-    }
+        "effect_amount": {"type": "slider", "min": 0, "max": 100, "default": 80, "suffix": "%"},
+        "brightness": {"type": "slider", "min": -100, "max": 100, "default": 0},
+        "contrast": {"type": "slider", "min": -100, "max": 100, "default": 10},
+        "saturation": {"type": "slider", "min": -100, "max": 100, "default": 15},
+        "temperature": {"type": "slider", "min": -100, "max": 100, "default": 0}
+    },
+    "controls_schema": [
+        {
+            "section": "Color Grade",
+            "controls": [
+                {"key": "effect_amount", "type": "slider", "min": 0, "max": 100, "default": 80, "suffix": "%", "label": "Strength"},
+                {"key": "brightness", "type": "slider", "min": -100, "max": 100, "default": 0, "label": "Brightness"},
+                {"key": "contrast", "type": "slider", "min": -100, "max": 100, "default": 10, "label": "Contrast"},
+                {"key": "saturation", "type": "slider", "min": -100, "max": 100, "default": 15, "label": "Saturation"},
+                {"key": "temperature", "type": "slider", "min": -100, "max": 100, "default": 0, "label": "Temperature"}
+            ]
+        }
+    ]
 }

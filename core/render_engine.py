@@ -59,10 +59,11 @@ class RenderEngine(QThread):
             if not self.is_playing:
                 self._force_render = True
                 
-    def set_preview_preset(self, preset_data):
+    def set_preview_preset(self, preset_data, target_clip_id=None):
         """Injects a preset to be previewed directly on the canvas without altering the project."""
         with QMutexLocker(self.mutex):
             self.preview_preset = preset_data
+            self.preview_target_clip_id = target_clip_id
             self._force_render = True
 
     def _clear_readers(self):
@@ -116,6 +117,24 @@ class RenderEngine(QThread):
         if ptype not in ["effect", "transition", "caption"]:
             return original_clip
             
+        target_clip_id = getattr(self, "preview_target_clip_id", None)
+        
+        if ptype == "transition":
+            clip = copy.copy(original_clip)
+            clip.applied_effects = {}
+            clip.transition_in = None
+            clip.transition_out = None
+            if target_clip_id and clip.clip_id == target_clip_id:
+                pname = self.preview_preset.get("title")
+                clip.applied_effects["transition_out"] = pname
+                clip.applied_effects["transition_out_duration"] = 30
+                clip.transition_out = pname
+                clip.transition_out_duration = 30
+            return clip
+
+        if target_clip_id and original_clip.clip_id != target_clip_id:
+            return original_clip
+            
         clip = copy.copy(original_clip)
         # Clear existing applied effects and transitions to cleanly preview what the user is hovering/clicking!
         clip.applied_effects = {}
@@ -133,12 +152,6 @@ class RenderEngine(QThread):
             clip.applied_effects["primary_effect"] = pname
             for k, v in defaults.items(): 
                 clip.applied_effects[k] = v
-            
-        elif ptype == "transition" and clip.clip_type in ["video", "image"]:
-            clip.applied_effects["transition_out"] = pname
-            clip.applied_effects["transition_out_duration"] = 30
-            clip.transition_out = pname
-            clip.transition_out_duration = 30
             
         return clip
 
@@ -175,9 +188,11 @@ class RenderEngine(QThread):
         reversed_tracks = list(reversed(project.tracks))
 
         active_clip_ids = set()
+        is_transition_preview = getattr(self, "preview_preset", None) and self.preview_preset.get("type") == "transition"
 
         for track in reversed_tracks:
             if track.is_hidden: continue
+            if is_transition_preview and track.track_id != "video_1": continue
             
             for original_clip in track.clips:
                 clip = self._get_effective_clip(original_clip)
@@ -210,7 +225,7 @@ class RenderEngine(QThread):
                             continue
                             
                         active_clip_ids.add(clip.clip_id)
-                        self._draw_caption(painter, clip, proj_w, proj_h)
+                        self._draw_caption(painter, clip, current_ms, proj_w, proj_h)
                         
         # Global Preview Pass for Captions
         if getattr(self, "preview_preset", None) and self.preview_preset.get("type") == "caption":
@@ -218,9 +233,10 @@ class RenderEngine(QThread):
             from core.preset_loader import get_default_properties
             defaults = get_default_properties({"properties": props})
             defaults["text"] = "Preview Caption"
+            defaults["preset_name"] = self.preview_preset.get("name", "Standard")
             
-            fake_clip = ClipData(file_path="", start_time=0, end_time=999999, clip_type="caption", applied_effects=defaults)
-            self._draw_caption(painter, fake_clip, proj_w, proj_h)
+            fake_clip = ClipData(file_path="", start_time=int(current_ms), end_time=int(current_ms)+5000, clip_type="caption", applied_effects=defaults)
+            self._draw_caption(painter, fake_clip, current_ms, proj_w, proj_h)
                         
         painter.end()
         return canvas, active_clip_ids
@@ -266,11 +282,17 @@ class RenderEngine(QThread):
             cap = self.video_readers[reader_key]
             
             trim_in_ms = getattr(clip, 'trim_in', 0)
+            props_local = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
             if isinstance(clip.applied_effects, dict):
                 fx_source_in = clip.applied_effects.get("source_in", 0) * 10
                 trim_in_ms = max(trim_in_ms, fx_source_in)
                 
-            local_ms = (current_ms - clip.start_time) + trim_in_ms
+            # --- VIDEO SPEED ---
+            # Speed is stored as a percentage (100 = normal, 200 = 2x fast, 50 = half-speed)
+            speed_pct = props_local.get("Speed", 100)
+            speed_factor = max(0.1, speed_pct / 100.0)
+            
+            local_ms = ((current_ms - clip.start_time) * speed_factor) + trim_in_ms
             current_pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
             
             diff = local_ms - current_pos_ms
@@ -361,7 +383,22 @@ class RenderEngine(QThread):
 
             painter.save()
             painter.setOpacity(opacity)
-            
+
+            # --- BLEND MODE (Image clips) ---
+            blend_mode = props.get("Blend_Mode", "Normal") if clip.clip_type == "image" else "Normal"
+            _blend_map = {
+                "Normal":   QPainter.CompositionMode_SourceOver,
+                "Multiply": QPainter.CompositionMode_Multiply,
+                "Screen":   QPainter.CompositionMode_Screen,
+                "Overlay":  QPainter.CompositionMode_Overlay,
+                "Darken":   QPainter.CompositionMode_Darken,
+                "Lighten":  QPainter.CompositionMode_Lighten,
+                "Add":      QPainter.CompositionMode_Plus,
+                "Difference": QPainter.CompositionMode_Difference,
+                "Exclusion":  QPainter.CompositionMode_Exclusion,
+            }
+            painter.setCompositionMode(_blend_map.get(blend_mode, QPainter.CompositionMode_SourceOver))
+
             center_x = (proj_w / 2) + pos_x
             center_y = (proj_h / 2) + pos_y
             painter.translate(center_x, center_y)
@@ -613,13 +650,24 @@ class RenderEngine(QThread):
         
         return result_lines if result_lines else [""]
 
-    def _draw_caption(self, painter, clip, proj_w, proj_h):
+    def _draw_caption(self, painter, clip, current_ms, proj_w, proj_h):
         props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
         
         # Text source: applied_effects["text"] (from property panel) > file_path (initial text from timeline item)
         text = props.get("text", "") or clip.file_path or "New Caption"
         if not text.strip(): 
             text = "New Caption"
+            
+        preset_name = props.get("preset_name", "")
+        duration_ms = clip.end_time - clip.start_time
+        elapsed_ms = current_ms - clip.start_time
+        progress = max(0.0, min(1.0, elapsed_ms / max(1, duration_ms)))
+
+        # Typewriter Effect
+        if preset_name == "Typewriter":
+            total_chars = len(text)
+            visible_chars = int(total_chars * progress)
+            text = text[:visible_chars]
         
         font_family = props.get("Font Family", "Arial")
         font_size = max(1, int(props.get("Font Size", 80)))
@@ -634,6 +682,19 @@ class RenderEngine(QThread):
         bg_color_hex = props.get("Bg Color", "transparent")
         bg_opacity = props.get("bg_opacity", 0) / 100.0
         
+        # Pop-up Animation
+        animation = props.get("animation", "Scale In")
+        if preset_name == "Pop-up" and elapsed_ms < 500: # First 0.5s
+            anim_progress = max(0.0, min(1.0, elapsed_ms / 500.0))
+            if animation == "Scale In":
+                import math
+                scale_pct *= math.sin(anim_progress * math.pi / 2.0)
+            elif animation == "Fade In":
+                opacity *= anim_progress
+            elif animation == "Bounce":
+                import math
+                scale_pct *= min(1.0, math.sin(anim_progress * math.pi) * 0.3 + anim_progress)
+
         # Text layout properties
         max_chars = int(props.get("max_chars_per_line", 0))  # 0 = no limit
         max_lines = int(props.get("max_lines", 0))           # 0 = no limit
@@ -695,27 +756,70 @@ class RenderEngine(QThread):
             )
             painter.drawRoundedRect(bg_rect, bg_radius, bg_radius)
         
+        # Karaoke Active Word logic
+        active_word_idx = -1
+        words_list = text.split()
+        if preset_name == "Karaoke" and words_list:
+            active_word_idx = min(len(words_list) - 1, int(len(words_list) * progress))
+        highlight_color_hex = props.get("highlight_color", "#FFD700")
+
         # Draw each line
         y_start = -total_h / 2
-        
+        global_word_counter = 0
+
         for i, line in enumerate(lines):
             line_y = y_start + i * (line_height + line_spacing)
             line_rect = QRectF(-max_line_w / 2, line_y, max_line_w, line_height)
             
-            # Text outline / shadow
-            if outline_width > 0:
-                painter.setPen(QPen(QColor(outline_color), outline_width))
-                for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1), (0, -1), (0, 1), (-1, 0), (1, 0)]:
-                    offset_rect = QRectF(
-                        line_rect.x() + dx * outline_width, 
-                        line_rect.y() + dy * outline_width,
-                        line_rect.width(), line_rect.height()
-                    )
-                    painter.drawText(offset_rect, h_align | Qt.AlignVCenter, line)
-            
-            # Main text
-            painter.setPen(QColor(color_hex))
-            painter.drawText(line_rect, h_align | Qt.AlignVCenter, line)
+            if preset_name == "Karaoke":
+                # Draw words individually
+                line_words = line.split(" ")
+                words_with_spaces = [w + " " for w in line_words]
+                if words_with_spaces:
+                    words_with_spaces[-1] = words_with_spaces[-1].strip() # remove last space
+                
+                # Calculate starting X for alignment
+                total_line_w = fm.horizontalAdvance(line)
+                if h_align == Qt.AlignLeft:
+                    current_x = line_rect.left()
+                elif h_align == Qt.AlignRight:
+                    current_x = line_rect.right() - total_line_w
+                else:
+                    current_x = line_rect.center().x() - (total_line_w / 2)
+                    
+                for w_idx, word in enumerate(words_with_spaces):
+                    adv = fm.horizontalAdvance(word)
+                    word_rect = QRectF(current_x, line_y, adv, line_height)
+                    
+                    is_active = (global_word_counter == active_word_idx)
+                    draw_color = highlight_color_hex if is_active else color_hex
+                    
+                    if outline_width > 0:
+                        painter.setPen(QPen(QColor(outline_color), outline_width))
+                        for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1), (0, -1), (0, 1), (-1, 0), (1, 0)]:
+                            offset_rect = word_rect.translated(dx * outline_width, dy * outline_width)
+                            painter.drawText(offset_rect, Qt.AlignLeft | Qt.AlignVCenter, word.strip())
+                            
+                    painter.setPen(QColor(draw_color))
+                    painter.drawText(word_rect, Qt.AlignLeft | Qt.AlignVCenter, word.strip())
+                    
+                    current_x += adv
+                    global_word_counter += 1
+            else:
+                # Text outline / shadow
+                if outline_width > 0:
+                    painter.setPen(QPen(QColor(outline_color), outline_width))
+                    for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1), (0, -1), (0, 1), (-1, 0), (1, 0)]:
+                        offset_rect = QRectF(
+                            line_rect.x() + dx * outline_width, 
+                            line_rect.y() + dy * outline_width,
+                            line_rect.width(), line_rect.height()
+                        )
+                        painter.drawText(offset_rect, h_align | Qt.AlignVCenter, line)
+                
+                # Main text
+                painter.setPen(QColor(color_hex))
+                painter.drawText(line_rect, h_align | Qt.AlignVCenter, line)
         
         painter.restore()
 

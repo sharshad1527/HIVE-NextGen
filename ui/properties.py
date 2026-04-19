@@ -63,8 +63,29 @@ class PropertiesPanel(QFrame):
 
         self.spinbox_style = """
             QSpinBox, QDoubleSpinBox {
-                background-color: rgba(26, 26, 26, 0.8); border: 1px solid rgba(255,255,255,0.1);
-                border-radius: 4px; color: #d1d1d1; padding: 4px; font-family: monospace;
+                background-color: #1f1f23; border: 1px solid #333338;
+                border-radius: 6px; color: #d1d1d1; padding: 4px 22px 4px 4px; font-family: 'Inter', sans-serif; font-size: 11px;
+            }
+            QSpinBox::up-button, QDoubleSpinBox::up-button {
+                subcontrol-origin: border; subcontrol-position: top right;
+                width: 14px; border-left: 1px solid #333338;
+                border-bottom: 1px solid #333338; border-top-right-radius: 4px; background: #2b2b30;
+            }
+            QSpinBox::down-button, QDoubleSpinBox::down-button {
+                subcontrol-origin: border; subcontrol-position: bottom right;
+                width: 14px; border-left: 1px solid #333338;
+                border-bottom-right-radius: 4px; background: #2b2b30;
+            }
+            QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover, QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {
+                background: #3a3a40;
+            }
+            QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {
+                image: url('data:image/svg+xml;utf8,<svg width="8" height="6" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5 0L10 6H0L5 0Z" fill="%23d1d1d1"/></svg>');
+                width: 7px; height: 5px;
+            }
+            QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {
+                image: url('data:image/svg+xml;utf8,<svg width="8" height="6" viewBox="0 0 10 6" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5 6L0 0H10L5 6Z" fill="%23d1d1d1"/></svg>');
+                width: 7px; height: 5px;
             }
         """
 
@@ -336,17 +357,27 @@ class PropertiesPanel(QFrame):
         slider.setValue(int(current))
         slider.setStyleSheet(self.slider_style)
 
-        val_lbl = QLabel(f"{int(current)}{suffix}")
-        val_lbl.setFixedWidth(36)
-        val_lbl.setStyleSheet("color: #d1d1d1; font-size: 10px; font-family: monospace;")
-        val_lbl.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        spin = QSpinBox()
+        spin.setRange(min_val, max_val)
+        spin.setValue(int(current))
+        if suffix:
+            spin.setSuffix(suffix if suffix.startswith(" ") else f" {suffix}")
+        spin.setFixedWidth(70)
+        spin.setStyleSheet(self.spinbox_style)
+        spin.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        
+        # Cross-couple slider and spinbox
+        slider.valueChanged.connect(spin.setValue)
+        spin.valueChanged.connect(slider.setValue)
 
-        slider.valueChanged.connect(lambda v, l=val_lbl, s=suffix: l.setText(f"{v}{s}"))
-        slider.valueChanged.connect(lambda v, k=key: self._on_prop_change(k, v, commit=False))
+        # Value emits
         slider.sliderReleased.connect(lambda s=slider, k=key: self._on_prop_change(k, s.value(), commit=True))
+        slider.valueChanged.connect(lambda v, k=key: self._on_prop_change(k, v, commit=False))
+        # Ensure exact typing triggers a permanent change
+        spin.editingFinished.connect(lambda s=spin, k=key: self._on_prop_change(k, s.value(), commit=True))
 
         controls_layout.addWidget(slider)
-        controls_layout.addWidget(val_lbl)
+        controls_layout.addWidget(spin)
         row.addWidget(controls)
         layout.addLayout(row)
 
@@ -372,8 +403,9 @@ class PropertiesPanel(QFrame):
         spin.setValue(float(current))
         spin.setSuffix(f" {suffix}" if suffix else "")
         spin.setDecimals(1)
-        spin.setFixedWidth(100)
+        spin.setFixedWidth(70)
         spin.setStyleSheet(self.spinbox_style)
+        spin.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
 
         spin.valueChanged.connect(lambda v, k=key: self._on_prop_change(k, v, commit=True))
 

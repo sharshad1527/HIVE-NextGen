@@ -3,14 +3,17 @@
     "icon": "mdi6.microphone-outline",
     "category": "captions",
     "properties": {
-        "font_family": {"type": "font", "default": "Montserrat"},
-        "font_size": {"type": "slider", "min": 10, "max": 200, "default": 56, "suffix": ""},
-        "text_color": {"type": "color", "default": "#FFFFFF"},
-        "highlight_color": {"type": "color", "default": "#E66B2C"},
-        "bg_color": {"type": "color", "default": "#000000"},
+        "Font Family": {"type": "font", "default": "Montserrat"},
+        "Font Size": {"type": "slider", "min": 10, "max": 200, "default": 56, "suffix": "px"},
+        "Text Color": {"type": "color", "default": "#FFFFFF"},
+        "Bg Color": {"type": "color", "default": "#000000"},
         "bg_opacity": {"type": "slider", "min": 0, "max": 100, "default": 60, "suffix": "%"},
-        "position_y": {"type": "slider", "min": -500, "max": 500, "default": 350, "suffix": "px"},
-        "outline_width": {"type": "slider", "min": 0, "max": 10, "default": 0, "suffix": "px"}
+        "outline_width": {"type": "slider", "min": 0, "max": 10, "default": 0, "suffix": "px"},
+        "max_chars_per_line": {"type": "slider", "min": 5, "max": 80, "default": 30},
+        "max_lines": {"type": "slider", "min": 1, "max": 8, "default": 2},
+        "word_wrap": {"type": "checkbox", "default": true},
+        "text_align": {"type": "combo", "options": ["Left", "Center", "Right"], "default":"Center"},
+        "font_weight": {"type": "combo", "options": ["Regular", "Bold", "Light", "Black"], "default": "Bold"}
     },
     "controls_schema": [
         {
@@ -25,8 +28,7 @@
                 {"key": "Font Family", "type": "font", "default": "Montserrat", "label": "Font"},
                 {"key": "Font Size", "type": "slider", "min": 8, "max": 300, "default": 56, "suffix": "px", "label": "Size"},
                 {"key": "font_weight", "type": "combo", "options": ["Regular", "Bold", "Light", "Black"], "default": "Bold", "label": "Weight"},
-                {"key": "Text Color", "type": "color", "default": "#FFFFFF", "label": "Text Color"},
-                {"key": "highlight_color", "type": "color", "default": "#E66B2C", "label": "Active Word"}
+                {"key": "Text Color", "type": "color", "default": "#FFFFFF", "label": "Text Color"}
             ]
         },
         {

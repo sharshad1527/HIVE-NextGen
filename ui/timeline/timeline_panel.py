@@ -144,7 +144,7 @@ class TimelinePanel(QFrame):
         self.btn_trim_right.clicked.connect(self.tracks_canvas.trim_right)
         self.btn_trash.clicked.connect(self.tracks_canvas.delete_selected_item)
         self.btn_freeze.clicked.connect(self.tracks_canvas.freeze_frame_at_playhead)
-        self.btn_reverse.clicked.connect(lambda: self.tracks_canvas.toggle_item_property("reverse"))
+        self.btn_reverse.clicked.connect(self._handle_reverse)
         self.btn_mirror.clicked.connect(lambda: self.tracks_canvas.toggle_item_property("mirror"))
         self.btn_rotate.clicked.connect(lambda: self.tracks_canvas.toggle_item_property("rotate"))
         self.btn_crop.clicked.connect(self._open_crop_dialog)
@@ -227,7 +227,25 @@ class TimelinePanel(QFrame):
 
     def _toggle_track_state(self, track_id, state_type):
         self.tracks_canvas.toggle_track_state(track_id, state_type)
+        self.tracks_canvas.sync_to_project()  # Sync hide state to engine immediately
         self._rebuild_headers()
+
+    def _handle_reverse(self):
+        from PySide6.QtWidgets import QMessageBox
+        has_video = any(
+            i for i in self.tracks_canvas.items
+            if i["id"] in self.tracks_canvas.selected_ids and i["type"] == "video"
+        )
+        if has_video:
+            reply = QMessageBox.question(
+                self, "Reverse Playback", 
+                "Do you want to mute the audio for this reversed clip?",
+                QMessageBox.Yes | QMessageBox.No
+            )
+            if reply == QMessageBox.Yes:
+                self.tracks_canvas.toggle_item_property("reverse", mute_audio=True)
+                return
+        self.tracks_canvas.toggle_item_property("reverse")
 
     def _on_item_selected(self, item_type, item_id, item_props):
         has_selection = bool(item_type) and item_type not in ["transition_in", "transition_out", "clip_effect"]

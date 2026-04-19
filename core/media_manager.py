@@ -240,34 +240,64 @@ class MediaManager:
             icon = 'mdi6.file-outline'
 
         thumb_path = None
+        duration_sec = 0.0
+
         if media_type == 'image':
-            thumb_path = file_path 
+            thumb_path = file_path
         elif media_type == 'video':
             file_hash = hashlib.md5(file_path.encode()).hexdigest()
             thumb_path = str(self.thumb_dir / f"{file_hash}.jpg")
             
-            if not os.path.exists(thumb_path):
-                try:
-                    import cv2
-                    cap = cv2.VideoCapture(file_path)
+            try:
+                import cv2
+                cap = cv2.VideoCapture(file_path)
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                if fps > 0 and frames > 0:
+                    duration_sec = frames / fps
+
+                if not os.path.exists(thumb_path):
                     ret, frame = cap.read()
                     if ret:
                         frame = cv2.resize(frame, (145, 80))
                         cv2.imwrite(thumb_path, frame)
+                cap.release()
+            except ImportError:
+                print("OpenCV (cv2) not installed. Skipping video thumbnail/duration detection.")
+                thumb_path = None
+            except Exception as e:
+                print(f"Failed to process video {file_path}: {e}")
+                thumb_path = None
+
+        elif media_type == 'audio':
+            # Try native wave module first (fast, no deps)
+            if ext == '.wav':
+                try:
+                    import wave
+                    with wave.open(file_path, 'rb') as wf:
+                        duration_sec = wf.getnframes() / float(wf.getframerate())
+                except Exception:
+                    pass
+            # Fall back to cv2/ffmpeg backend
+            if duration_sec <= 0:
+                try:
+                    import cv2
+                    cap = cv2.VideoCapture(file_path)
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                    if fps > 0 and frames > 0:
+                        duration_sec = frames / fps
                     cap.release()
-                except ImportError:
-                    print("OpenCV (cv2) not installed. Skipping video thumbnail generation.")
-                    thumb_path = None
-                except Exception as e:
-                    print(f"Failed to generate thumbnail for {file_path}: {e}")
-                    thumb_path = None
+                except Exception:
+                    pass
 
         return {
             "path": file_path,
             "name": os.path.basename(file_path),
             "type": media_type,
             "icon": icon,
-            "thumbnail": thumb_path
+            "thumbnail": thumb_path,
+            "duration": duration_sec,  # seconds, 0.0 if unknown
         }
 
     def start_proxy_generation(self, file_path, on_progress_callback, on_finish_callback, on_fail_callback=None):

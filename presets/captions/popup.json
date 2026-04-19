@@ -3,15 +3,18 @@
     "icon": "mdi6.message-text-outline",
     "category": "captions",
     "properties": {
-        "font_family": {"type": "font", "default": "Sour Gummy"},
-        "font_size": {"type": "slider", "min": 10, "max": 200, "default": 64, "suffix": ""},
-        "text_color": {"type": "color", "default": "#FFFFFF"},
-        "bg_color": {"type": "color", "default": "#E66B2C"},
+        "Font Family": {"type": "font", "default": "Sour Gummy"},
+        "Font Size": {"type": "slider", "min": 10, "max": 200, "default": 64, "suffix": "px"},
+        "Text Color": {"type": "color", "default": "#FFFFFF"},
+        "Bg Color": {"type": "color", "default": "#E66B2C"},
         "bg_opacity": {"type": "slider", "min": 0, "max": 100, "default": 90, "suffix": "%"},
         "bg_radius": {"type": "slider", "min": 0, "max": 50, "default": 12, "suffix": "px"},
         "bg_padding": {"type": "slider", "min": 0, "max": 50, "default": 16, "suffix": "px"},
-        "position_y": {"type": "slider", "min": -500, "max": 500, "default": 300, "suffix": "px"},
-        "animation": {"type": "combo", "options": ["None", "Scale In", "Bounce", "Fade In"], "default": "Scale In"}
+        "max_chars_per_line": {"type": "slider", "min": 5, "max": 80, "default": 25},
+        "max_lines": {"type": "slider", "min": 1, "max": 8, "default": 2},
+        "word_wrap": {"type": "checkbox", "default": true},
+        "text_align": {"type": "combo", "options": ["Left", "Center", "Right"], "default": "Center"},
+        "font_weight": {"type": "combo", "options": ["Regular", "Bold", "Light", "Black"], "default": "Bold"}
     },
     "controls_schema": [
         {
@@ -43,13 +46,8 @@
             "controls": [
                 {"key": "max_chars_per_line", "type": "slider", "min": 5, "max": 80, "default": 25, "suffix": " chars", "label": "Line Width"},
                 {"key": "max_lines", "type": "slider", "min": 1, "max": 8, "default": 2, "label": "Max Lines"},
-                {"key": "word_wrap", "type": "checkbox", "default": true, "label": "Word Wrap"}
-            ]
-        },
-        {
-            "section": "Animation",
-            "controls": [
-                {"key": "animation", "type": "combo", "options": ["None", "Scale In", "Bounce", "Fade In"], "default": "Scale In", "label": "Enter Animation"}
+                {"key": "word_wrap", "type": "checkbox", "default": true, "label": "Word Wrap"},
+                {"key": "text_align", "type": "combo", "options": ["Left", "Center", "Right"], "default": "Center", "label": "Alignment"}
             ]
         },
         {
