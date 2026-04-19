@@ -1134,15 +1134,16 @@ class TracksCanvas(QWidget):
     def _create_def(self, group, num, tid):
         label_prefix = group.capitalize()
         if group == "video": label_prefix = "V"
-        elif group == "effect": label_prefix = "Effects "
+        elif group == "effect": label_prefix = "Fx"
         elif group == "audio": label_prefix = "A"
+        elif group == "caption": label_prefix = "C"
         
         label = f"{label_prefix}{num}"
         if num == 1:
             if group == "video": label = "V1 - Main"
-            elif group == "audio": label = "A1 - Voice"
-            elif group == "caption": label = "Captions"
-            elif group == "effect": label = "Effects 1"
+            elif group == "audio": label = "A1 - Audio"
+            elif group == "caption": label = "C1"
+            elif group == "effect": label = "Fx1"
             
         icon = "mdi6.auto-fix"
         if group == "caption": icon = "mdi6.comment-text-outline"
@@ -1182,22 +1183,45 @@ class TracksCanvas(QWidget):
                 elif group == "audio":
                     audio_zone.append(tid)
 
-        group_counts = {"video": 1, "audio": 1, "caption": 0, "effect": 0, "word": 0}
+        max_group_counts = {"video": 1, "audio": 1, "caption": 0, "effect": 0, "word": 0}
+        
+        # Determine the maximum used numerical ID for each track group to assign new tracks properly
+        all_zones = top_zone + audio_zone
+        for old_id in all_zones:
+            group = old_id.split("_")[0]
+            try:
+                num = int(old_id.split("_")[1])
+            except:
+                num = 0
+            if num < 10000:
+                max_group_counts[group] = max(max_group_counts.get(group, 0), num)
+
         new_defs = []
         track_mapping = {}
 
-        # Top Zone (Captions, Effects, V2+)
-        for old_id in top_zone:
+        # 1. Map ID assignments from bottom to top so that newly generated tracks get assigned V3, V4 incrementally
+        for old_id in reversed(top_zone):
             group = old_id.split("_")[0]
-            if group == "video":
-                group_counts["video"] += 1
-                new_num = group_counts["video"]
+            try:
+                num = int(old_id.split("_")[1])
+            except:
+                num = 0
+
+            if num >= 10000:
+                # Brand new track!
+                max_group_counts[group] += 1
+                new_num = max_group_counts[group]
+                new_id = f"{group}_{new_num}"
+                track_mapping[old_id] = new_id
             else:
-                group_counts[group] += 1
-                new_num = group_counts[group]
-                
-            new_id = f"{group}_{new_num}"
-            track_mapping[old_id] = new_id
+                # Existing track! Keep its identifier permanently.
+                track_mapping[old_id] = old_id
+
+        # 2. Append actual visual defs in top-to-bottom UI display order
+        for old_id in top_zone:
+            new_id = track_mapping[old_id]
+            group = new_id.split("_")[0]
+            new_num = int(new_id.split("_")[1])
             new_defs.append(self._create_def(group, new_num, new_id))
             
         # Mid Separator
@@ -1209,10 +1233,22 @@ class TracksCanvas(QWidget):
         # Audio Extra
         for old_id in audio_zone:
             group = "audio"
-            group_counts["audio"] += 1
-            new_num = group_counts["audio"]
-            new_id = f"{group}_{new_num}"
-            track_mapping[old_id] = new_id
+            try:
+                num = int(old_id.split("_")[1])
+            except:
+                num = 0
+                
+            if num >= 10000:
+                # Brand new track!
+                max_group_counts["audio"] += 1
+                new_num = max_group_counts["audio"]
+                new_id = f"audio_{new_num}"
+                track_mapping[old_id] = new_id
+            else:
+                track_mapping[old_id] = old_id
+                new_num = num
+                new_id = old_id
+                
             new_defs.append(self._create_def("audio", new_num, new_id))
             
         # Word Base
