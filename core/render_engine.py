@@ -182,18 +182,35 @@ class RenderEngine(QThread):
                 self.video_readers[reader_key] = cv2.VideoCapture(file_path)
             
             cap = self.video_readers[reader_key]
-            local_ms = (current_ms - clip.start_time) + clip.trim_in
+            
+            # Extract proper trim offset from applied_effects (UI sets source_in via logic units, 1 unit = 10ms)
+            trim_in_ms = getattr(clip, 'trim_in', 0)
+            if isinstance(clip.applied_effects, dict):
+                fx_source_in = clip.applied_effects.get("source_in", 0) * 10
+                trim_in_ms = max(trim_in_ms, fx_source_in)
+                
+            local_ms = (current_ms - clip.start_time) + trim_in_ms
             current_pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
             
+            # Seek if out of sync (backward seeking, or big jumps forward)
             if local_ms < current_pos_ms or (local_ms - current_pos_ms) > 100:
                 cap.set(cv2.CAP_PROP_POS_MSEC, local_ms)
                 
             ret, frame = cap.read()
             
             if not ret:
+                # Retry: OpenCV sometimes drops the first frame right after a seek
                 cap.set(cv2.CAP_PROP_POS_MSEC, local_ms)
                 ret, frame = cap.read()
-            
+                
+            if not ret:
+                # Final Fallback: If local_ms is completely beyond the EOF, grab the very last frame so it doesn't blank out
+                fps = cap.get(cv2.CAP_PROP_FPS)
+                if fps > 0:
+                    total_ms = (cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps) * 1000
+                    cap.set(cv2.CAP_PROP_POS_MSEC, max(0, total_ms - 100))
+                    ret, frame = cap.read()
+
             if ret:
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = frame.shape
@@ -212,6 +229,23 @@ class RenderEngine(QThread):
             rotation = props.get("Rotation", 0)
             opacity = props.get("Opacity", 100) / 100.0
 
+            # Direct mapping from Crop UI bounds (The UI already calculates proper aspect ratios)
+            crop_x = props.get("crop_x", 0) / 100.0
+            crop_y = props.get("crop_y", 0) / 100.0
+            crop_w = props.get("crop_w", 100) / 100.0
+            crop_h = props.get("crop_h", 100) / 100.0
+
+            img_w = qimg.width()
+            img_h = qimg.height()
+
+            # Identify the exact region of the image we want to keep
+            cw = max(1.0, img_w * crop_w)
+            ch = max(1.0, img_h * crop_h)
+            cx = img_w * crop_x
+            cy = img_h * crop_y
+
+            source_rect = QRectF(cx, cy, cw, ch)
+
             painter.save()
             painter.setOpacity(opacity)
             
@@ -222,23 +256,12 @@ class RenderEngine(QThread):
             if rotation != 0:
                 painter.rotate(rotation)
                 
-            if scale_pct != 1.0:
-                painter.scale(scale_pct, scale_pct)
+            # Map the cropped section to fill the project screen, then apply user scale
+            ratio = min(proj_w / cw, proj_h / ch)
+            draw_w = cw * ratio * scale_pct
+            draw_h = ch * ratio * scale_pct
 
-            target_w = qimg.width()
-            target_h = qimg.height()
-            
-            # Optimization: Zero-Copy Scaling. Instead of allocating a new QImage with .scaled(),
-            # we let the painter map the original image to a calculated QRectF.
-            if scale_pct == 1.0 and rotation == 0 and pos_x == 0 and pos_y == 0:
-                if target_w > 0 and target_h > 0:
-                    ratio = min(proj_w / target_w, proj_h / target_h)
-                    draw_w = target_w * ratio
-                    draw_h = target_h * ratio
-                    painter.drawImage(QRectF(-draw_w / 2, -draw_h / 2, draw_w, draw_h), qimg)
-            else:
-                painter.drawImage(QRectF(-target_w / 2, -target_h / 2, target_w, target_h), qimg)
-                
+            painter.drawImage(QRectF(-draw_w / 2, -draw_h / 2, draw_w, draw_h), qimg, source_rect)
             painter.restore()
 
     def _draw_caption(self, painter, clip, proj_w, proj_h):

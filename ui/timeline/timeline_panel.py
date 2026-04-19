@@ -9,6 +9,7 @@ from core.project_manager import project_manager
 
 # Import the detached canvas component
 from .timeline_canvas import TracksCanvas
+from ui.crop_dialog import CropDialog
 
 
 class TimelinePanel(QFrame):
@@ -49,7 +50,7 @@ class TimelinePanel(QFrame):
         self.btn_reverse = self._create_tool_btn('mdi6.history', False, "Reverse (Ctrl+R)")
         self.btn_mirror = self._create_tool_btn('mdi6.swap-horizontal', False, "Mirror (Alt+M)")
         self.btn_rotate = self._create_tool_btn('mdi6.rotate-right', False, "Rotate (Alt+R)")
-        self.btn_crop = self._create_tool_btn('mdi6.crop', False, "Crop (Alt+C)")
+        self.btn_crop = self._create_tool_btn('mdi6.crop', False, "Crop Media (Alt+C)")
 
         for w in [self.btn_pointer, self.btn_blade, sep1, self.btn_undo, self.btn_redo, sep2, 
                   self.btn_split, self.btn_trim_left, self.btn_trim_right, self.btn_trash, sep3,
@@ -142,16 +143,22 @@ class TimelinePanel(QFrame):
         self.btn_trim_left.clicked.connect(self.tracks_canvas.trim_left)
         self.btn_trim_right.clicked.connect(self.tracks_canvas.trim_right)
         self.btn_trash.clicked.connect(self.tracks_canvas.delete_selected_item)
-        self.btn_freeze.clicked.connect(lambda: self.tracks_canvas.toggle_item_property("freeze"))
+        self.btn_freeze.clicked.connect(self.tracks_canvas.freeze_frame_at_playhead)
         self.btn_reverse.clicked.connect(lambda: self.tracks_canvas.toggle_item_property("reverse"))
         self.btn_mirror.clicked.connect(lambda: self.tracks_canvas.toggle_item_property("mirror"))
         self.btn_rotate.clicked.connect(lambda: self.tracks_canvas.toggle_item_property("rotate"))
-        self.btn_crop.clicked.connect(lambda: self.tracks_canvas.toggle_item_property("crop"))
+        self.btn_crop.clicked.connect(self._open_crop_dialog)
 
         global_signals.project_loaded.connect(self.on_project_loaded)
         
         if project_manager.current_project:
             QTimer.singleShot(0, lambda: self.on_project_loaded(project_manager.current_project))
+
+    def _open_crop_dialog(self):
+        selected_ids = list(self.tracks_canvas.selected_ids)
+        if not selected_ids: return
+        dialog = CropDialog(self.tracks_canvas, selected_ids[0], self)
+        dialog.exec()
 
     def on_project_loaded(self, project_data: ProjectData):
         """Passes the backend project data down to the canvas to be drawn."""
@@ -229,7 +236,7 @@ class TimelinePanel(QFrame):
         self._update_btn_visuals(self.btn_trim_left, has_selection)
         self._update_btn_visuals(self.btn_trim_right, has_selection)
         has_video = item_type in ["video", "image", "multiple"]
-        self._update_btn_visuals(self.btn_freeze, has_video)
+        self._update_btn_visuals(self.btn_freeze, has_video and item_type == "video")
         self._update_btn_visuals(self.btn_reverse, has_video)
         self._update_btn_visuals(self.btn_mirror, has_video)
         self._update_btn_visuals(self.btn_rotate, has_video)

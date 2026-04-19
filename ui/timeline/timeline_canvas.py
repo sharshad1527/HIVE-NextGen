@@ -4,6 +4,7 @@ import copy
 import json
 import os
 import hashlib
+import uuid
 from PySide6.QtWidgets import QWidget
 from PySide6.QtCore import Qt, QRect, QPoint, Signal, QTimer, QThreadPool, QCoreApplication
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath, QCursor, QPixmap
@@ -729,6 +730,80 @@ class TracksCanvas(QWidget):
             self.state_changed.emit()
             self.update()
             
+    def freeze_frame_at_playhead(self):
+        """Extracts the video frame exactly at the playhead, splits the track, and inserts a 3s image clip."""
+        if not CV2_AVAILABLE:
+            print("Cannot Freeze Frame: OpenCV is not installed.")
+            return
+
+        changed = False
+        for s_id in list(self.selected_ids):
+            item = next((i for i in self.items if i["id"] == s_id), None)
+            if item and item["type"] == "video" and not self.is_track_locked(item["track"]):
+                if item["x"] < self.logical_playhead < item["x"] + item["w"]:
+                    
+                    local_ms = (self.logical_playhead - item["x"] + item.get("source_in", 0)) * 10
+                    file_path = item.get("file_path")
+                    
+                    if not file_path or not os.path.exists(file_path):
+                        continue
+                        
+                    cap = cv2.VideoCapture(file_path)
+                    cap.set(cv2.CAP_PROP_POS_MSEC, local_ms)
+                    ret, frame = cap.read()
+                    cap.release()
+                    
+                    if ret:
+                        cache_dir = self.get_project_cache_dir()
+                        os.makedirs(cache_dir, exist_ok=True)
+                        frame_path = os.path.join(cache_dir, f"freeze_{uuid.uuid4().hex[:8]}.jpg")
+                        cv2.imwrite(frame_path, frame)
+                        
+                        cut_x = self.logical_playhead
+                        insert_duration = 300 # 300 units = 3 seconds (10ms per unit)
+                        
+                        for other in self.items:
+                            if other["track"] == item["track"] and other["x"] >= cut_x and other["id"] != item["id"]:
+                                other["x"] += insert_duration
+                        
+                        new_item_right = copy.deepcopy(item)
+                        new_item_right["id"] = f"{item['id']}_right_{random.randint(1000, 9999)}"
+                        
+                        old_w = item["w"]
+                        diff = cut_x - item["x"]
+                        
+                        item["w"] = diff
+                        
+                        new_item_right["x"] = cut_x + insert_duration
+                        new_item_right["w"] = old_w - diff
+                        new_item_right["source_in"] = item.get("source_in", 0) + diff
+                        
+                        if item.get("max_w", float('inf')) != float('inf'):
+                            item["max_w"] = item["w"]
+                            new_item_right["max_w"] = new_item_right["w"]
+                        
+                        freeze_item = {
+                            "id": f"image_{random.randint(10000, 99999)}",
+                            "track": item["track"],
+                            "type": "image",
+                            "text": "Freeze Frame",
+                            "file_path": frame_path,
+                            "x": cut_x,
+                            "w": insert_duration,
+                            "max_w": float('inf'),
+                            "source_in": 0
+                        }
+                        
+                        self.items.append(freeze_item)
+                        self.items.append(new_item_right)
+                        changed = True
+                        
+        if changed:
+            self.save_state()
+            self._apply_magnetic_v1()
+            self.update_max_width()
+            self.update()
+
     def split_at_playhead(self):
         changed = False
         for s_id in list(self.selected_ids):
@@ -1809,7 +1884,11 @@ class TracksCanvas(QWidget):
             if item.get("reverse"): prefix += "[Rev] "
             if item.get("mirror"): prefix += "[M] "
             if item.get("rotate"): prefix += "[Rot] "
-            if item.get("crop"): prefix += "[C] "
+            
+            # Show Crop preset tag dynamically!
+            crop_type = item.get("crop_preset", "Original")
+            if crop_type != "Original": prefix += f"[{crop_type}] "
+            elif item.get("crop"): prefix += "[C] "
             
             painter.setFont(QFont("Arial", 8, QFont.Bold))
             painter.drawText(rect.adjusted(5, 5, -5, -5), Qt.AlignLeft | Qt.AlignTop, prefix + item["text"])
