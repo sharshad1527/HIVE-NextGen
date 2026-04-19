@@ -523,25 +523,35 @@ class PropertiesPanel(QFrame):
         controls.setFixedWidth(140)
         controls_layout = QHBoxLayout(controls)
         controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(5)
+        controls_layout.setSpacing(4)
 
+        # Remove Spinbox Arrows and Label explicitly to fix Squishing
+        lbl_x = QLabel("X:")
+        lbl_x.setStyleSheet("color: #808080; font-size: 10px; font-weight: bold;")
         x_spin = QSpinBox()
         x_spin.setRange(min_val, max_val)
         x_spin.setValue(int(current_x))
-        x_spin.setPrefix("X: ")
+        x_spin.setButtonSymbols(QSpinBox.NoButtons)
         x_spin.setStyleSheet(self.spinbox_style)
+        x_spin.setAlignment(Qt.AlignCenter)
 
+        lbl_y = QLabel("Y:")
+        lbl_y.setStyleSheet("color: #808080; font-size: 10px; font-weight: bold;")
         y_spin = QSpinBox()
         y_spin.setRange(min_val, max_val)
         y_spin.setValue(int(current_y))
-        y_spin.setPrefix("Y: ")
+        y_spin.setButtonSymbols(QSpinBox.NoButtons)
         y_spin.setStyleSheet(self.spinbox_style)
+        y_spin.setAlignment(Qt.AlignCenter)
 
         x_spin.valueChanged.connect(lambda v: self._on_prop_change("Position_X", v, commit=True))
         y_spin.valueChanged.connect(lambda v: self._on_prop_change("Position_Y", v, commit=True))
 
+        controls_layout.addWidget(lbl_x)
         controls_layout.addWidget(x_spin)
+        controls_layout.addWidget(lbl_y)
         controls_layout.addWidget(y_spin)
+        
         row.addWidget(controls)
         layout.addLayout(row)
 
