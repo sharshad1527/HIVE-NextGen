@@ -358,14 +358,27 @@ class RenderEngine(QThread):
             rotation = props.get("Rotation", 0)
             opacity = props.get("Opacity", 100) / 100.0
             
-            # Transition Playback Support (Cross Dissolve Alpha)
+            # Transition Playback Support 
             trans_in = props.get("transition_in")
             if trans_in:
                 dur_frames = props.get("transition_in_duration", 30)
                 dur_ms = dur_frames * (1000.0 / 30.0)
                 elapsed_ms = current_ms - clip.start_time
                 if 0 <= elapsed_ms < dur_ms:
-                    opacity *= max(0.0, min(1.0, elapsed_ms / dur_ms))
+                    progress = elapsed_ms / dur_ms
+                    if trans_in == "Cross Dissolve":
+                        opacity *= progress
+                    elif trans_in == "Slide":
+                        pos_x += (progress - 1.0) * proj_w
+                    elif trans_in == "Wipe":
+                        opacity *= progress  # Simple fallback wipe implementation
+                    elif trans_in == "Zoom":
+                        scale_pct *= progress
+                    elif trans_in == "Spin":
+                        rotation += (1.0 - progress) * 360
+                        scale_pct *= progress
+                    else:
+                        opacity *= progress
                     
             trans_out = props.get("transition_out")
             if trans_out:
@@ -373,7 +386,20 @@ class RenderEngine(QThread):
                 dur_ms = dur_frames * (1000.0 / 30.0)
                 remaining_ms = clip.end_time - current_ms
                 if 0 <= remaining_ms < dur_ms:
-                    opacity *= max(0.0, min(1.0, remaining_ms / dur_ms))
+                    progress = remaining_ms / dur_ms
+                    if trans_out == "Cross Dissolve":
+                        opacity *= progress
+                    elif trans_out == "Slide":
+                        pos_x += (1.0 - progress) * proj_w
+                    elif trans_out == "Wipe":
+                        opacity *= progress
+                    elif trans_out == "Zoom":
+                        scale_pct *= progress
+                    elif trans_out == "Spin":
+                        rotation += (1.0 - progress) * 360
+                        scale_pct *= progress
+                    else:
+                        opacity *= progress
 
             crop_x = props.get("crop_x", 0) / 100.0
             crop_y = props.get("crop_y", 0) / 100.0
