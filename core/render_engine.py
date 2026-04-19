@@ -498,6 +498,58 @@ class RenderEngine(QThread):
         
         return work
 
+    @staticmethod
+    def _wrap_text(text, max_chars, word_wrap, max_lines):
+        """Break text into lines based on layout settings."""
+        if max_chars <= 0 or not text:
+            lines = [text] if text else [""]
+            return lines[:max_lines] if max_lines > 0 else lines
+        
+        result_lines = []
+        paragraphs = text.split('\n')
+        
+        for paragraph in paragraphs:
+            if not paragraph.strip():
+                result_lines.append("")
+                continue
+                
+            if len(paragraph) <= max_chars:
+                result_lines.append(paragraph)
+                continue
+            
+            if word_wrap:
+                # Word-boundary wrapping
+                words = paragraph.split(' ')
+                current_line = ""
+                for word in words:
+                    test = f"{current_line} {word}".strip() if current_line else word
+                    if len(test) <= max_chars:
+                        current_line = test
+                    else:
+                        if current_line:
+                            result_lines.append(current_line)
+                        # Handle single words longer than max_chars
+                        while len(word) > max_chars:
+                            result_lines.append(word[:max_chars])
+                            word = word[max_chars:]
+                        current_line = word
+                if current_line:
+                    result_lines.append(current_line)
+            else:
+                # Hard character break
+                for i in range(0, len(paragraph), max_chars):
+                    result_lines.append(paragraph[i:i + max_chars])
+        
+        if max_lines > 0 and len(result_lines) > max_lines:
+            result_lines = result_lines[:max_lines]
+            # Add ellipsis to last line if truncated
+            if result_lines:
+                last = result_lines[-1]
+                if len(last) > 3:
+                    result_lines[-1] = last[:-3] + "..."
+        
+        return result_lines if result_lines else [""]
+
     def _draw_caption(self, painter, clip, proj_w, proj_h):
         props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
         
@@ -507,7 +559,7 @@ class RenderEngine(QThread):
             text = "New Caption"
         
         font_family = props.get("Font Family", "Arial")
-        font_size = max(1, int(props.get("Font Size", 80)))  # Clamp to minimum 1
+        font_size = max(1, int(props.get("Font Size", 80)))
         color_hex = props.get("Text Color", "#FFFFFF")
         pos_x = props.get("Position_X", 0)
         pos_y = props.get("Position_Y", 0)
@@ -519,10 +571,25 @@ class RenderEngine(QThread):
         bg_color_hex = props.get("Bg Color", "transparent")
         bg_opacity = props.get("bg_opacity", 0) / 100.0
         
+        # Text layout properties
+        max_chars = int(props.get("max_chars_per_line", 0))  # 0 = no limit
+        max_lines = int(props.get("max_lines", 0))           # 0 = no limit
+        word_wrap = bool(props.get("word_wrap", True))
+        text_align = props.get("text_align", "Center")
+        
+        # Font weight mapping
+        weight_map = {
+            "Regular": QFont.Normal, "Bold": QFont.Bold,
+            "Light": QFont.Light, "Black": QFont.Black,
+            "Thin": QFont.Thin, "Medium": QFont.Medium,
+            "DemiBold": QFont.DemiBold, "ExtraBold": QFont.ExtraBold,
+        }
+        font_weight_name = props.get("font_weight", "Bold")
+        font_weight = weight_map.get(font_weight_name, QFont.Bold)
+        
         painter.save()
         painter.setOpacity(opacity)
         
-        # Apply transform
         center_x = proj_w / 2 + pos_x
         center_y = proj_h / 2 + pos_y
         painter.translate(center_x, center_y)
@@ -532,14 +599,22 @@ class RenderEngine(QThread):
         if scale_pct != 1.0:
             painter.scale(scale_pct, scale_pct)
         
-        font = QFont(font_family, font_size, QFont.Bold)
+        font = QFont(font_family, font_size, font_weight)
         painter.setFont(font)
-        
-        # Calculate text bounds for background
         fm = painter.fontMetrics()
-        text_rect = fm.boundingRect(text)
-        text_w = text_rect.width()
-        text_h = text_rect.height()
+        
+        # Apply text layout wrapping
+        lines = self._wrap_text(text, max_chars, word_wrap, max_lines)
+        
+        # Calculate total bounds
+        line_height = fm.height()
+        line_spacing = int(line_height * 0.15)
+        total_h = len(lines) * line_height + max(0, len(lines) - 1) * line_spacing
+        max_line_w = max(fm.horizontalAdvance(line) for line in lines) if lines else 0
+        
+        # Alignment flag
+        align_map = {"Left": Qt.AlignLeft, "Center": Qt.AlignHCenter, "Right": Qt.AlignRight}
+        h_align = align_map.get(text_align, Qt.AlignHCenter)
         
         # Background box
         if bg_color_hex and bg_color_hex != "transparent" and bg_opacity > 0:
@@ -550,28 +625,34 @@ class RenderEngine(QThread):
             painter.setBrush(QBrush(bg_color))
             painter.setPen(Qt.NoPen)
             bg_rect = QRectF(
-                -text_w / 2 - bg_padding,
-                -text_h / 2 - bg_padding,
-                text_w + bg_padding * 2,
-                text_h + bg_padding * 2
+                -max_line_w / 2 - bg_padding,
+                -total_h / 2 - bg_padding,
+                max_line_w + bg_padding * 2,
+                total_h + bg_padding * 2
             )
             painter.drawRoundedRect(bg_rect, bg_radius, bg_radius)
         
-        # Text outline / shadow
-        if outline_width > 0:
-            painter.setPen(QPen(QColor(outline_color), outline_width))
-            for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1), (0, -1), (0, 1), (-1, 0), (1, 0)]:
-                painter.drawText(
-                    QRectF(-text_w / 2 + dx * outline_width, -text_h / 2 + dy * outline_width, text_w, text_h),
-                    Qt.AlignCenter | Qt.TextWordWrap, text
-                )
+        # Draw each line
+        y_start = -total_h / 2
         
-        # Main text
-        painter.setPen(QColor(color_hex))
-        painter.drawText(
-            QRectF(-text_w / 2, -text_h / 2, text_w, text_h),
-            Qt.AlignCenter | Qt.TextWordWrap, text
-        )
+        for i, line in enumerate(lines):
+            line_y = y_start + i * (line_height + line_spacing)
+            line_rect = QRectF(-max_line_w / 2, line_y, max_line_w, line_height)
+            
+            # Text outline / shadow
+            if outline_width > 0:
+                painter.setPen(QPen(QColor(outline_color), outline_width))
+                for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1), (0, -1), (0, 1), (-1, 0), (1, 0)]:
+                    offset_rect = QRectF(
+                        line_rect.x() + dx * outline_width, 
+                        line_rect.y() + dy * outline_width,
+                        line_rect.width(), line_rect.height()
+                    )
+                    painter.drawText(offset_rect, h_align | Qt.AlignVCenter, line)
+            
+            # Main text
+            painter.setPen(QColor(color_hex))
+            painter.drawText(line_rect, h_align | Qt.AlignVCenter, line)
         
         painter.restore()
 

@@ -7,5 +7,24 @@
         "scanline_opacity": {"type": "slider", "min": 0, "max": 100, "default": 40, "suffix": "%"},
         "chromatic_shift": {"type": "slider", "min": 0, "max": 20, "default": 5, "suffix": "px"},
         "noise": {"type": "slider", "min": 0, "max": 100, "default": 30, "suffix": "%"}
+    },
+    "controls_schema": [
+        {
+            "section": "VHS Settings",
+            "controls": [
+                {"key": "effect_amount", "type": "slider", "min": 0, "max": 100, "default": 70, "suffix": "%", "label": "Intensity"},
+                {"key": "scanline_opacity", "type": "slider", "min": 0, "max": 100, "default": 40, "suffix": "%", "label": "Scanlines"},
+                {"key": "chromatic_shift", "type": "slider", "min": 0, "max": 20, "default": 5, "suffix": "px", "label": "Chroma Shift"},
+                {"key": "noise", "type": "slider", "min": 0, "max": 100, "default": 30, "suffix": "%", "label": "Noise"}
+            ]
+        }
+    ],
+    "effect_overrides": {
+        "hide": ["Corner_Radius"],
+        "inject": [
+            {"key": "scanline_opacity", "type": "slider", "min": 0, "max": 100, "default": 40, "suffix": "%", "label": "Scanlines"},
+            {"key": "chromatic_shift", "type": "slider", "min": 0, "max": 20, "default": 5, "suffix": "px", "label": "Chroma Shift"},
+            {"key": "noise", "type": "slider", "min": 0, "max": 100, "default": 30, "suffix": "%", "label": "Noise"}
+        ]
     }
 }

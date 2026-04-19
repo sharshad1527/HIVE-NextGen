@@ -480,6 +480,10 @@ class PlayerPanel(QFrame):
         # Connect interactive transform signals
         self.timeline_canvas.transform_changed.connect(self._on_canvas_transform)
         
+        # Connect global property changes to force a re-render
+        if hasattr(global_signals, 'clip_transform_changed'):
+            global_signals.clip_transform_changed.connect(self._on_property_changed_rerender)
+        
         self.media_stack.addWidget(self.placeholder_lbl)
         self.media_stack.addWidget(self.video_widget)
         self.media_stack.addWidget(self.timeline_canvas) 

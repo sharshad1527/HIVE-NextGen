@@ -3,7 +3,7 @@
     "icon": "mdi6.closed-caption-outline",
     "category": "captions",
     "properties": {
-        "font_family": {"type": "combo", "options": ["Roboto", "Arial", "Sour Gummy", "Montserrat", "Inter", "Poppins"], "default": "Roboto"},
+        "font_family": {"type": "font", "default": "Roboto"},
         "font_size": {"type": "slider", "min": 10, "max": 200, "default": 48, "suffix": ""},
         "text_color": {"type": "color", "default": "#FFFFFF"},
         "bg_color": {"type": "color", "default": "transparent"},
@@ -11,5 +11,49 @@
         "position_y": {"type": "slider", "min": -500, "max": 500, "default": 350, "suffix": "px"},
         "outline_width": {"type": "slider", "min": 0, "max": 10, "default": 2, "suffix": "px"},
         "outline_color": {"type": "color", "default": "#000000"}
-    }
+    },
+    "controls_schema": [
+        {
+            "section": "Content",
+            "controls": [
+                {"key": "text", "type": "text", "default": "", "placeholder": "Enter caption...", "label": "Text"}
+            ]
+        },
+        {
+            "section": "Typography",
+            "controls": [
+                {"key": "Font Family", "type": "font", "default": "Roboto", "label": "Font"},
+                {"key": "Font Size", "type": "slider", "min": 8, "max": 300, "default": 48, "suffix": "px", "label": "Size"},
+                {"key": "font_weight", "type": "combo", "options": ["Regular", "Bold", "Light", "Black"], "default": "Bold", "label": "Weight"},
+                {"key": "Text Color", "type": "color", "default": "#FFFFFF", "label": "Text Color"},
+                {"key": "Bg Color", "type": "color", "default": "transparent", "label": "Background"},
+                {"key": "bg_opacity", "type": "slider", "min": 0, "max": 100, "default": 0, "suffix": "%", "label": "BG Opacity"}
+            ]
+        },
+        {
+            "section": "Text Layout",
+            "controls": [
+                {"key": "max_chars_per_line", "type": "slider", "min": 5, "max": 80, "default": 40, "suffix": " chars", "label": "Line Width"},
+                {"key": "max_lines", "type": "slider", "min": 1, "max": 8, "default": 3, "label": "Max Lines"},
+                {"key": "word_wrap", "type": "checkbox", "default": true, "label": "Word Wrap"},
+                {"key": "text_align", "type": "combo", "options": ["Left", "Center", "Right"], "default": "Center", "label": "Alignment"}
+            ]
+        },
+        {
+            "section": "Outline",
+            "controls": [
+                {"key": "outline_width", "type": "slider", "min": 0, "max": 15, "default": 2, "suffix": "px", "label": "Outline Width"},
+                {"key": "outline_color", "type": "color", "default": "#000000", "label": "Outline Color"}
+            ]
+        },
+        {
+            "section": "Transform",
+            "controls": [
+                {"key": "position", "type": "xy", "min": -9999, "max": 9999, "default_x": 0, "default_y": 350, "label": "Position"},
+                {"key": "Scale", "type": "slider", "min": 10, "max": 400, "default": 100, "suffix": "%", "label": "Scale"},
+                {"key": "Rotation", "type": "slider", "min": -180, "max": 180, "default": 0, "suffix": "°", "label": "Rotation"},
+                {"key": "Opacity", "type": "slider", "min": 0, "max": 100, "default": 100, "suffix": "%", "label": "Opacity"}
+            ]
+        }
+    ]
 }

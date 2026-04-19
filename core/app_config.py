@@ -32,7 +32,7 @@ class AppConfig:
         self.data = self._load()
         
         # Initialize default settings if they don't exist
-        self.settings = self.data.get("settings", {
+        default_settings = {
             "language": "English",
             "theme": "Dark",
             "default_image_duration": 5.0,
@@ -46,8 +46,11 @@ class AppConfig:
             "proxy_resolution": "360p",
             "export_format": "MP4",
             "export_codec": "H.264",
-            "copy_media_to_project": False # New Option
-        })
+            "copy_media_to_project": False
+        }
+        loaded_settings = self.data.get("settings", {})
+        self.settings = {**default_settings, **loaded_settings}
+        self.data["settings"] = self.settings
         
         # Clean up the trash bin automatically
         self.cleanup_bin()
@@ -102,7 +105,8 @@ class AppConfig:
 
     # --- Generic Settings Accessors ---
     def get_setting(self, key, default_value=None):
-        return self.settings.get(key, default_value)
+        val = self.settings.get(key, default_value)
+        return val if val is not None else default_value
 
     def set_setting(self, key, value):
         self.settings[key] = value

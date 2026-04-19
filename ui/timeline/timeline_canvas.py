@@ -358,9 +358,13 @@ class TracksCanvas(QWidget):
             if item["id"] == item_id:
                 item[prop_name] = new_value
                 self.update()
-                if save_state:
-                    self.save_state()
                 break
+        
+        if save_state:
+            self.save_state()
+        else:
+            # Always sync so the render engine sees changes immediately (preview refresh fix)
+            self.sync_to_project()
         
         # Force the preview player to re-render with the updated property
         global_signals.clip_transform_changed.emit(item_id, prop_name, new_value)

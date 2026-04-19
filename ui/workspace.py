@@ -453,7 +453,7 @@ class WorkspacePanel(QFrame):
                 QPushButton:hover { color: #ffffff; }
                 QPushButton:checked { color: #ffffff; border-bottom: 2px solid #e66b2c; }
             """)
-            btn.clicked.connect(lambda checked, index=i: self.switch_tab(index))
+            btn.clicked.connect(lambda checked=False, idx=i: self.switch_tab(idx))
             self.tab_buttons.append(btn)
             tab_layout.addWidget(btn)
         

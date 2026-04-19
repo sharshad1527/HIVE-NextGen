@@ -3,7 +3,7 @@
     "icon": "mdi6.message-text-outline",
     "category": "captions",
     "properties": {
-        "font_family": {"type": "combo", "options": ["Roboto", "Arial", "Sour Gummy", "Montserrat", "Inter", "Poppins"], "default": "Sour Gummy"},
+        "font_family": {"type": "font", "default": "Sour Gummy"},
         "font_size": {"type": "slider", "min": 10, "max": 200, "default": 64, "suffix": ""},
         "text_color": {"type": "color", "default": "#FFFFFF"},
         "bg_color": {"type": "color", "default": "#E66B2C"},
@@ -12,5 +12,54 @@
         "bg_padding": {"type": "slider", "min": 0, "max": 50, "default": 16, "suffix": "px"},
         "position_y": {"type": "slider", "min": -500, "max": 500, "default": 300, "suffix": "px"},
         "animation": {"type": "combo", "options": ["None", "Scale In", "Bounce", "Fade In"], "default": "Scale In"}
-    }
+    },
+    "controls_schema": [
+        {
+            "section": "Content",
+            "controls": [
+                {"key": "text", "type": "text", "default": "", "placeholder": "Enter popup text...", "label": "Text"}
+            ]
+        },
+        {
+            "section": "Typography",
+            "controls": [
+                {"key": "Font Family", "type": "font", "default": "Sour Gummy", "label": "Font"},
+                {"key": "Font Size", "type": "slider", "min": 8, "max": 300, "default": 64, "suffix": "px", "label": "Size"},
+                {"key": "font_weight", "type": "combo", "options": ["Regular", "Bold", "Light", "Black"], "default": "Bold", "label": "Weight"},
+                {"key": "Text Color", "type": "color", "default": "#FFFFFF", "label": "Text Color"}
+            ]
+        },
+        {
+            "section": "Background",
+            "controls": [
+                {"key": "Bg Color", "type": "color", "default": "#E66B2C", "label": "BG Color"},
+                {"key": "bg_opacity", "type": "slider", "min": 0, "max": 100, "default": 90, "suffix": "%", "label": "BG Opacity"},
+                {"key": "bg_radius", "type": "slider", "min": 0, "max": 50, "default": 12, "suffix": "px", "label": "Corner Radius"},
+                {"key": "bg_padding", "type": "slider", "min": 0, "max": 50, "default": 16, "suffix": "px", "label": "Padding"}
+            ]
+        },
+        {
+            "section": "Text Layout",
+            "controls": [
+                {"key": "max_chars_per_line", "type": "slider", "min": 5, "max": 80, "default": 25, "suffix": " chars", "label": "Line Width"},
+                {"key": "max_lines", "type": "slider", "min": 1, "max": 8, "default": 2, "label": "Max Lines"},
+                {"key": "word_wrap", "type": "checkbox", "default": true, "label": "Word Wrap"}
+            ]
+        },
+        {
+            "section": "Animation",
+            "controls": [
+                {"key": "animation", "type": "combo", "options": ["None", "Scale In", "Bounce", "Fade In"], "default": "Scale In", "label": "Enter Animation"}
+            ]
+        },
+        {
+            "section": "Transform",
+            "controls": [
+                {"key": "position", "type": "xy", "min": -9999, "max": 9999, "default_x": 0, "default_y": 300, "label": "Position"},
+                {"key": "Scale", "type": "slider", "min": 10, "max": 400, "default": 100, "suffix": "%", "label": "Scale"},
+                {"key": "Rotation", "type": "slider", "min": -180, "max": 180, "default": 0, "suffix": "°", "label": "Rotation"},
+                {"key": "Opacity", "type": "slider", "min": 0, "max": 100, "default": 100, "suffix": "%", "label": "Opacity"}
+            ]
+        }
+    ]
 }
