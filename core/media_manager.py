@@ -291,20 +291,27 @@ class MediaManager:
             
         task = self.proxy_queue.popleft()
         
-        thread = ProxyGeneratorThread(task["file_path"], self.proxy_dir)
-        self.active_proxy_threads.add(thread)
-        
-        if task["on_progress_callback"]:
-            thread.progress_updated.connect(task["on_progress_callback"])
-        if task["on_finish_callback"]:
-            thread.proxy_finished.connect(task["on_finish_callback"])
-        if task["on_fail_callback"]:
-            thread.proxy_failed.connect(task["on_fail_callback"])
+        if "on_progress_callback" in task:
+            thread = ProxyGeneratorThread(task["file_path"], self.proxy_dir)
+            self.active_proxy_threads.add(thread)
             
-        thread.finished.connect(lambda t=thread: self._on_proxy_thread_finished(t))
-        thread.finished.connect(thread.deleteLater)
-        
-        thread.start()
+            if task.get("on_progress_callback"):
+                thread.progress_updated.connect(task["on_progress_callback"])
+            if task.get("on_finish_callback"):
+                thread.proxy_finished.connect(task["on_finish_callback"])
+            if task.get("on_fail_callback"):
+                thread.proxy_failed.connect(task["on_fail_callback"])
+                
+            thread.finished.connect(lambda t=thread: self._on_proxy_thread_finished(t))
+            thread.finished.connect(thread.deleteLater)
+            thread.start()
+        else:
+            thread = WaveformGeneratorThread(task["file_path"], app_config.waveform_cache_path)
+            self.active_proxy_threads.add(thread) 
+            thread.waveform_ready.connect(self._on_waveform_ready)
+            thread.finished.connect(lambda t=thread: self._on_proxy_thread_finished(t))
+            thread.finished.connect(thread.deleteLater)
+            thread.start()
 
     def _on_proxy_thread_finished(self, thread):
         """Releases the thread from the resource pool and triggers the next item in the queue."""
@@ -316,13 +323,11 @@ class MediaManager:
         if not os.path.exists(file_path):
             return
             
-        thread = WaveformGeneratorThread(file_path, app_config.waveform_cache_path)
-        # Borrow the proxy resource cap pool to manage memory here too
-        self.active_proxy_threads.add(thread) 
-        thread.waveform_ready.connect(self._on_waveform_ready)
-        thread.finished.connect(lambda t=thread: self._on_proxy_thread_finished(t))
-        thread.finished.connect(thread.deleteLater)
-        thread.start()
+        task = {
+            "file_path": file_path
+        }
+        self.proxy_queue.append(task)
+        self._process_next_proxy()
 
     def _on_waveform_ready(self, file_path, data):
         from core.signal_hub import global_signals

@@ -464,7 +464,7 @@ class PlayerPanel(QFrame):
         if QApplication.instance():
             QApplication.instance().aboutToQuit.connect(self._cleanup)
 
-    def _on_clip_selected_for_preview(self, clip_id):
+    def _on_clip_selected_for_preview(self, item_type, clip_id):
         """Enable interactive handles in the preview canvas when a clip is selected."""
         self.timeline_canvas.set_selected_clip(clip_id)
     

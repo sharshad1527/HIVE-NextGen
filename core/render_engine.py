@@ -127,98 +127,38 @@ class RenderEngine(QThread):
 
         current_ms = int(logical_time * 10)
 
-        visible_clips = []
-        for track in project.tracks:
-            if track.is_hidden: continue
-            for clip in track.clips:
-                if clip.start_time <= current_ms < clip.end_time:
-                    visible_clips.append((track, clip))
-
-        # Separate clips by category for layered compositing
-        video_clips = []  # (track, clip) for video/image on video tracks
-        effect_clips = []  # (track, clip) for standalone effects on effect tracks
-        caption_clips = []  # (track, clip) for captions
-        
-        for track, clip in visible_clips:
-            if clip.clip_type in ["video", "image"] and clip.file_path:
-                video_clips.append((track, clip))
-            elif clip.clip_type == "effect" and track.track_type == "effect":
-                effect_clips.append((track, clip))
-            elif clip.clip_type == "caption":
-                caption_clips.append((track, clip))
-
-        # Local alias for readability
-        get_track_num = self._get_track_num
-
-        # Sort video clips by track number (V1 first = bottom layer)
-        video_clips.sort(key=lambda x: self._get_track_num(x[0].track_id))
-        # Sort effect clips by track number
-        effect_clips.sort(key=lambda x: self._get_track_num(x[0].track_id))
-        # Sort captions by track number
-        caption_clips.sort(key=lambda x: self._get_track_num(x[0].track_id))
+        # Render directly from bottom to top (visual index N to 0)
+        reversed_tracks = list(reversed(project.tracks))
 
         active_clip_ids = set()
 
-        # BUG 4 FIX: Layered compositing — effects only affect video layers BELOW them.
-        # Track layout (top to bottom in UI): Caption > V2 > Effect1 > V1 > Audio
-        # Compositing order: Draw V1 first (bottom), apply Effect1, then draw V2, then captions
-        
-        # Build effect lookup: effect track number -> effect clip
-        effect_by_track = {}
-        for track, clip in effect_clips:
-            active_clip_ids.add(clip.clip_id)
-            tn = get_track_num(track.track_id)
-            effect_by_track[tn] = (track, clip)
-
-        # Get the sorted list of video track numbers
-        video_track_nums = sorted(set(get_track_num(t.track_id) for t, c in video_clips))
-        
-        # Draw video clips from bottom (V1) to top (V2, V3, etc.)
-        for v_num in video_track_nums:
-            # Draw all video clips on this track
-            for track, clip in video_clips:
-                if get_track_num(track.track_id) == v_num:
-                    active_clip_ids.add(clip.clip_id)
-                    self._draw_media(painter, clip, current_ms, proj_w, proj_h)
+        for track in reversed_tracks:
+            if track.is_hidden: continue
             
-            # After drawing this video layer, apply any effect tracks that sit 
-            # right below it (effect tracks between this V-track and the next V-track)
-            # Effect numbering corresponds to the video track they affect
-            for e_num in sorted(effect_by_track.keys()):
-                e_track, e_clip = effect_by_track[e_num]
-                # Apply effect to the entire canvas so far
-                if e_num <= v_num:
-                    painter.end()
-                    canvas = self._apply_track_effect(canvas, e_clip, render_w, render_h)
-                    painter = QPainter(canvas)
-                    if self._render_scale < 1.0:
-                        painter.setRenderHint(QPainter.Antialiasing, False)
-                        painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
-                    else:
-                        painter.setRenderHint(QPainter.Antialiasing)
-                        painter.setRenderHint(QPainter.SmoothPixmapTransform)
-                    painter.scale(self._render_scale, self._render_scale)
-                    del effect_by_track[e_num]  # Apply each effect only once
-        
-        # Apply any remaining effects that weren't matched to a video track
-        for e_num in sorted(effect_by_track.keys()):
-            e_track, e_clip = effect_by_track[e_num]
-            painter.end()
-            canvas = self._apply_track_effect(canvas, e_clip, render_w, render_h)
-            painter = QPainter(canvas)
-            if self._render_scale < 1.0:
-                painter.setRenderHint(QPainter.Antialiasing, False)
-                painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
-            else:
-                painter.setRenderHint(QPainter.Antialiasing)
-                painter.setRenderHint(QPainter.SmoothPixmapTransform)
-            painter.scale(self._render_scale, self._render_scale)
-
-        # Draw captions on top of everything
-        for track, clip in caption_clips:
-            active_clip_ids.add(clip.clip_id)
-            self._draw_caption(painter, clip, proj_w, proj_h)
-                
+            for clip in track.clips:
+                if clip.start_time <= current_ms < clip.end_time:
+                    
+                    if clip.clip_type in ["video", "image"]:
+                        active_clip_ids.add(clip.clip_id)
+                        self._draw_media(painter, clip, current_ms, proj_w, proj_h)
+                        
+                    elif clip.clip_type == "effect":
+                        active_clip_ids.add(clip.clip_id)
+                        painter.end()
+                        canvas = self._apply_track_effect(canvas, clip, render_w, render_h)
+                        painter = QPainter(canvas)
+                        if self._render_scale < 1.0:
+                            painter.setRenderHint(QPainter.Antialiasing, False)
+                            painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
+                        else:
+                            painter.setRenderHint(QPainter.Antialiasing)
+                            painter.setRenderHint(QPainter.SmoothPixmapTransform)
+                        painter.scale(self._render_scale, self._render_scale)
+                        
+                    elif clip.clip_type == "caption":
+                        active_clip_ids.add(clip.clip_id)
+                        self._draw_caption(painter, clip, proj_w, proj_h)
+                        
         painter.end()
         return canvas, active_clip_ids
 
