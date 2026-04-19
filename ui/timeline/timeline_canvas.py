@@ -1112,57 +1112,111 @@ class TracksCanvas(QWidget):
         self.setMinimumWidth(max(int(self.max_logical_width * self.zoom_factor), 100))
         self.update()
 
+    def move_track_up(self, track_id):
+        idx = next((i for i, t in enumerate(self.track_defs) if t["id"] == track_id), -1)
+        if idx > 0 and track_id not in ["video_1", "audio_1", "word_1"]:
+            prev_t = self.track_defs[idx-1]["id"]
+            if prev_t not in ["video_1", "audio_1", "word_1"]:
+                self.track_defs[idx], self.track_defs[idx-1] = self.track_defs[idx-1], self.track_defs[idx]
+                self._cleanup_empty_tracks()
+                self.update()
+
+    def move_track_down(self, track_id):
+        idx = next((i for i, t in enumerate(self.track_defs) if t["id"] == track_id), -1)
+        if idx != -1 and idx < len(self.track_defs) - 1 and track_id not in ["video_1", "audio_1", "word_1"]:
+            next_t = self.track_defs[idx+1]["id"]
+            if next_t not in ["video_1", "audio_1", "word_1"]:
+                self.track_defs[idx], self.track_defs[idx+1] = self.track_defs[idx+1], self.track_defs[idx]
+                self._cleanup_empty_tracks()
+                self.update()
+
+    def _create_def(self, group, num, tid):
+        label_prefix = group.capitalize()
+        if group == "video": label_prefix = "V"
+        elif group == "effect": label_prefix = "Effects "
+        elif group == "audio": label_prefix = "A"
+        
+        label = f"{label_prefix}{num}"
+        if num == 1:
+            if group == "video": label = "V1 - Main"
+            elif group == "audio": label = "A1 - Voice"
+            elif group == "caption": label = "Captions"
+            elif group == "effect": label = "Effects 1"
+            
+        icon = "mdi6.auto-fix"
+        if group == "caption": icon = "mdi6.comment-text-outline"
+        elif group == "video": icon = "mdi6.movie-open-outline"
+        elif group == "audio": icon = "mdi6.volume-high"
+        elif group == "word": icon = "mdi6.format-text"
+        
+        height = 80 if group == "video" else (64 if group == "audio" else 48)
+        return {"id": tid, "group": group, "label": label, "icon": icon, "height": height}
+
     def _cleanup_empty_tracks(self):
         active_track_ids = set()
         for item in self.items:
             active_track_ids.add(item["track"])
             
-        # Ensure base tracks always exist
         for base in ["video_1", "audio_1", "caption_1", "effect_1", "word_1"]:
             active_track_ids.add(base)
             
-        ordered_active = []
+        top_zone = []
+        audio_zone = []
+        
         for t in self.track_defs:
-            if t["id"] in active_track_ids:
-                ordered_active.append(t["id"])
-                
-        # Append any track IDs that weren't inside track_defs (extremely new tracks)
+            tid = t["id"]
+            if tid in active_track_ids:
+                if tid in ["video_1", "audio_1", "word_1"]: continue
+                group = tid.split("_")[0]
+                if group in ["video", "caption", "effect"]:
+                    top_zone.append(tid)
+                elif group == "audio":
+                    audio_zone.append(tid)
+                    
         for tid in active_track_ids:
-            if tid not in ordered_active:
-                ordered_active.append(tid)
+            if tid not in top_zone and tid not in audio_zone and tid not in ["video_1", "audio_1", "word_1"]:
+                group = tid.split("_")[0]
+                if group in ["video", "caption", "effect"]:
+                    top_zone.append(tid)
+                elif group == "audio":
+                    audio_zone.append(tid)
 
-        group_counts = {"video": 0, "audio": 0, "caption": 0, "effect": 0, "word": 0}
+        group_counts = {"video": 1, "audio": 1, "caption": 0, "effect": 0, "word": 0}
         new_defs = []
         track_mapping = {}
 
-        # Re-number the active tracks top-to-bottom sequentially
-        for old_id in ordered_active:
+        # Top Zone (Captions, Effects, V2+)
+        for old_id in top_zone:
             group = old_id.split("_")[0]
-            group_counts[group] += 1
-            new_num = group_counts[group]
+            if group == "video":
+                group_counts["video"] += 1
+                new_num = group_counts["video"]
+            else:
+                group_counts[group] += 1
+                new_num = group_counts[group]
+                
             new_id = f"{group}_{new_num}"
             track_mapping[old_id] = new_id
-
-            label_prefix = group.capitalize()
-            if group == "video": label_prefix = "V"
-            elif group == "effect": label_prefix = "Effects "
-            elif group == "audio": label_prefix = "A"
+            new_defs.append(self._create_def(group, new_num, new_id))
             
-            label = f"{label_prefix}{new_num}"
-            if new_num == 1:
-                if group == "video": label = "V1 - Main"
-                elif group == "audio": label = "A1 - Voice"
-                elif group == "caption": label = "Captions"
-                elif group == "effect": label = "Effects 1"
-                
-            icon = "mdi6.auto-fix"
-            if group == "caption": icon = "mdi6.comment-text-outline"
-            elif group == "video": icon = "mdi6.movie-open-outline"
-            elif group == "audio": icon = "mdi6.volume-high"
-            elif group == "word": icon = "mdi6.format-text"
+        # Mid Separator
+        track_mapping["video_1"] = "video_1"
+        new_defs.append(self._create_def("video", 1, "video_1"))
+        track_mapping["audio_1"] = "audio_1"
+        new_defs.append(self._create_def("audio", 1, "audio_1"))
+        
+        # Audio Extra
+        for old_id in audio_zone:
+            group = "audio"
+            group_counts["audio"] += 1
+            new_num = group_counts["audio"]
+            new_id = f"{group}_{new_num}"
+            track_mapping[old_id] = new_id
+            new_defs.append(self._create_def("audio", new_num, new_id))
             
-            height = 80 if group == "video" else (64 if group == "audio" else 48)
-            new_defs.append({"id": new_id, "group": group, "label": label, "icon": icon, "height": height})
+        # Word Base
+        track_mapping["word_1"] = "word_1"
+        new_defs.append(self._create_def("word", 1, "word_1"))
 
         for item in self.items:
             if item["track"] in track_mapping:

@@ -347,6 +347,24 @@ class TimelinePanel(QFrame):
             layout.addWidget(lbl)
             layout.addStretch()
 
+            if track_id not in ["video_1", "audio_1", "word_1"]:
+                btn_up = QPushButton()
+                btn_up.setIcon(qta.icon('mdi6.chevron-up', color='#555555'))
+                btn_up.setFixedSize(16, 20)
+                btn_up.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: rgba(255,255,255,0.1); border-radius: 4px; }")
+                btn_up.setCursor(Qt.PointingHandCursor)
+                btn_up.clicked.connect(lambda _, t_id=track_id: self.tracks_canvas.move_track_up(t_id))
+                
+                btn_down = QPushButton()
+                btn_down.setIcon(qta.icon('mdi6.chevron-down', color='#555555'))
+                btn_down.setFixedSize(16, 20)
+                btn_down.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: rgba(255,255,255,0.1); border-radius: 4px; }")
+                btn_down.setCursor(Qt.PointingHandCursor)
+                btn_down.clicked.connect(lambda _, t_id=track_id: self.tracks_canvas.move_track_down(t_id))
+                
+                layout.addWidget(btn_up)
+                layout.addWidget(btn_down)
+
             if group != "word":
                 btn_hide = QPushButton()
                 btn_hide.setIcon(qta.icon('mdi6.eye-off-outline' if hidden else 'mdi6.eye-outline', color='#e66b2c' if hidden else '#555555'))
