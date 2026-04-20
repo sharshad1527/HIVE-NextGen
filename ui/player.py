@@ -626,9 +626,15 @@ class PlayerPanel(QFrame):
         global_signals.clip_selected.connect(self._on_clip_selected_for_preview)
         global_signals.clip_deselected.connect(self._on_clip_deselected_for_preview)
         global_signals.project_resolution_changed.connect(self._on_project_resolution_changed)
+        if hasattr(global_signals, 'clip_updated'):
+            global_signals.clip_updated.connect(self._on_clip_updated)
         
         if QApplication.instance():
             QApplication.instance().aboutToQuit.connect(self._cleanup)
+
+    def _on_clip_updated(self, clip_data):
+        if not self.is_playing:
+            self._sync_timeline_audio(int(self.playhead))
 
     def _force_refresh_render(self):
         if not self.is_playing:

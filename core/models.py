@@ -5,12 +5,17 @@ from typing import List, Dict, Optional, Any
 import uuid
 from enum import Enum
 import copy
+import math
 
 class Easing(Enum):
     LINEAR = 0
     EASE_IN = 1
     EASE_OUT = 2
     EASE_IN_OUT = 3
+    BOUNCE = 4
+    ELASTIC = 5
+    CUBIC_IN = 6
+    CUBIC_OUT = 7
 
 @dataclass
 class Keyframe:
@@ -128,6 +133,32 @@ class ClipData:
                     t = t * (2 - t)
                 elif k1.easing == Easing.EASE_IN_OUT:
                     t = t * t * (3 - 2 * t)
+                elif k1.easing == Easing.CUBIC_IN:
+                    t = t * t * t
+                elif k1.easing == Easing.CUBIC_OUT:
+                    t = 1 - math.pow(1 - t, 3)
+                elif k1.easing == Easing.BOUNCE:
+                    n1 = 7.5625
+                    d1 = 2.75
+                    if t < 1 / d1:
+                        t = n1 * t * t
+                    elif t < 2 / d1:
+                        t -= 1.5 / d1
+                        t = n1 * t * t + 0.75
+                    elif t < 2.5 / d1:
+                        t -= 2.25 / d1
+                        t = n1 * t * t + 0.9375
+                    else:
+                        t -= 2.625 / d1
+                        t = n1 * t * t + 0.984375
+                elif k1.easing == Easing.ELASTIC:
+                    c4 = (2 * math.pi) / 3
+                    if t == 0:
+                        t = 0
+                    elif t == 1:
+                        t = 1
+                    else:
+                        t = -math.pow(2, 10 * t - 10) * math.sin((t * 10 - 10.75) * c4)
                     
                 return k1.value + (k2.value - k1.value) * t
                 

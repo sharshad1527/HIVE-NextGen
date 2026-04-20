@@ -1348,6 +1348,7 @@ class TracksCanvas(QWidget):
                 if ix <= physical_x <= ix + iw:
                     backend_clip = self._get_backend_clip(item["id"])
                     if backend_clip and hasattr(backend_clip, 'animations'):
+                        hit_kfs = []
                         for prop, anim_track in backend_clip.animations.items():
                             if not getattr(anim_track, 'enabled', True): continue
                             for kf in getattr(anim_track, 'keyframes', []):
@@ -1355,13 +1356,15 @@ class TracksCanvas(QWidget):
                                 kf_x = int(kf_abs_time * z)
                                 kf_y = item.get("visual_y", ty) + th / 2
                                 if abs(physical_x - kf_x) < diamond_hit_radius and abs(y - kf_y) < diamond_hit_radius:
-                                    return item, backend_clip, (prop, kf)
+                                    hit_kfs.append((prop, kf))
+                        if hit_kfs:
+                            return item, backend_clip, hit_kfs
                     
-                    return item, backend_clip, None
-        return None, None, None
+                    return item, backend_clip, []
+        return None, None, []
 
     def contextMenuEvent(self, event):
-        item, backend_clip, kf_tuple = self._get_item_and_kf_at(event.pos())
+        item, backend_clip, hit_kfs = self._get_item_and_kf_at(event.pos())
         if not item: return
         
         if item["id"] not in self.selected_ids:
@@ -1372,38 +1375,64 @@ class TracksCanvas(QWidget):
         
         menu = QMenu(self)
         
-        if kf_tuple:
-            prop_name, kf = kf_tuple
-            title = menu.addAction(f"{prop_name.replace('_', ' ').title()} Keyframe")
+        if hit_kfs:
+            title_text = ", ".join([prop.replace('_', ' ').title() for prop, kf in hit_kfs])
+            if len(hit_kfs) > 2:
+                title_text = f"{len(hit_kfs)} Keyframes"
+            else:
+                title_text += " Keyframe" + ("s" if len(hit_kfs) > 1 else "")
+                
+            title = menu.addAction(title_text)
             title.setEnabled(False)
             menu.addSeparator()
             
             linear_act = menu.addAction("Linear Interpolation")
             ease_in_act = menu.addAction("Ease In")
             ease_out_act = menu.addAction("Ease Out")
+            ease_in_out_act = menu.addAction("Ease In-Out")
+            bounce_act = menu.addAction("Bounce")
+            elastic_act = menu.addAction("Elastic")
+            cubic_in_act = menu.addAction("Cubic In")
+            cubic_out_act = menu.addAction("Cubic Out")
+            
             menu.addSeparator()
-            del_kf_act = menu.addAction("Delete Keyframe")
+            graph_act = menu.addAction("Open Graph Editor")
+            menu.addSeparator()
+            
+            del_kf_act = menu.addAction("Delete Keyframe" + ("s" if len(hit_kfs) > 1 else ""))
             
             action = menu.exec(event.globalPos())
             
-            if action in [linear_act, ease_in_act, ease_out_act]:
+            if action in [linear_act, ease_in_act, ease_out_act, ease_in_out_act, bounce_act, elastic_act, cubic_in_act, cubic_out_act]:
                 if Easing:
-                    if action == linear_act: kf.easing = Easing.LINEAR
-                    elif action == ease_in_act: kf.easing = Easing.EASE_IN
-                    elif action == ease_out_act: kf.easing = Easing.EASE_OUT
+                    for prop_name, kf in hit_kfs:
+                        if action == linear_act: kf.easing = Easing.LINEAR
+                        elif action == ease_in_act: kf.easing = Easing.EASE_IN
+                        elif action == ease_out_act: kf.easing = Easing.EASE_OUT
+                        elif action == ease_in_out_act: kf.easing = Easing.EASE_IN_OUT
+                        elif action == bounce_act: kf.easing = Easing.BOUNCE
+                        elif action == elastic_act: kf.easing = Easing.ELASTIC
+                        elif action == cubic_in_act: kf.easing = Easing.CUBIC_IN
+                        elif action == cubic_out_act: kf.easing = Easing.CUBIC_OUT
+                        
                 if hasattr(global_signals, 'clip_updated'): global_signals.clip_updated.emit(backend_clip)
                 if hasattr(global_signals, 'force_refresh'): global_signals.force_refresh.emit()
                 self.update()
-                
+            elif action == graph_act:
+                from .graph_editor import GraphEditorDialog
+                dialog = GraphEditorDialog(item, backend_clip, hit_kfs, self)
+                dialog.exec()
             elif action == del_kf_act:
-                anim_track = backend_clip.animations[prop_name]
-                if hasattr(anim_track, 'remove_keyframe'):
-                    anim_track.remove_keyframe(kf.time)
-                else:
-                    anim_track.keyframes.remove(kf)
-                
-                if not anim_track.keyframes:
-                    anim_track.enabled = False
+                for prop_name, kf in hit_kfs:
+                    anim_track = backend_clip.animations[prop_name]
+                    if hasattr(anim_track, 'remove_keyframe'):
+                        anim_track.remove_keyframe(kf.time)
+                    else:
+                        if kf in anim_track.keyframes:
+                            anim_track.keyframes.remove(kf)
+                    
+                    if not anim_track.keyframes:
+                        anim_track.enabled = False
                     
                 if hasattr(global_signals, 'clip_updated'): global_signals.clip_updated.emit(backend_clip)
                 if hasattr(global_signals, 'force_refresh'): global_signals.force_refresh.emit()
@@ -1451,11 +1480,11 @@ class TracksCanvas(QWidget):
             logical_x = physical_x / z
             y = event.position().y()
             
-            item, backend_clip, kf_tuple = self._get_item_and_kf_at(event.position().toPoint())
-            if kf_tuple:
+            item, backend_clip, hit_kfs = self._get_item_and_kf_at(event.position().toPoint())
+            if hit_kfs:
                 self.dragging_kf_item = item
                 self.dragging_kf_backend = backend_clip
-                self.dragging_kf_prop, self.dragging_kf = kf_tuple
+                self.dragging_kf_prop, self.dragging_kf = hit_kfs[0]
                 self._drag_started = True
                 self.setCursor(Qt.ClosedHandCursor)
                 
@@ -1991,6 +2020,7 @@ class TracksCanvas(QWidget):
         backend_clip = self._get_backend_clip(item["id"])
         if not backend_clip or not hasattr(backend_clip, 'animations'): return
         
+        painter.save()
         diamond_size = 7
         painter.setBrush(QColor("#e66b2c"))
         painter.setPen(QPen(QColor("white"), 1))
@@ -2009,6 +2039,7 @@ class TracksCanvas(QWidget):
                     QPoint(kf_x - diamond_size, kf_y)
                 ]
                 painter.drawPolygon(QPolygon(poly))
+        painter.restore()
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -2260,17 +2291,17 @@ class TracksCanvas(QWidget):
 
             elif item["type"] == "audio":
                 if is_selected:
-                    painter.fillPath(path, QColor(80, 80, 80, 60))
-                    painter.setPen(QPen(QColor("#a0a0a0"), 1))
-                    wave_color = QColor("#a0a0a0")
+                    painter.fillPath(path, QColor(50, 50, 50, 180))
+                    painter.setPen(QPen(QColor("#666666"), 1))
+                    wave_color = QColor("#777777")
                 elif is_hovered:
-                    painter.fillPath(path, QColor(255, 255, 255, 15))
-                    painter.setPen(QPen(QColor("#606060"), 1))
-                    wave_color = QColor("#cccccc")
+                    painter.fillPath(path, QColor(35, 35, 35, 180))
+                    painter.setPen(QPen(QColor("#555555"), 1))
+                    wave_color = QColor("#666666")
                 else:
-                    painter.fillPath(path, QColor(40, 40, 40, 80))
-                    painter.setPen(QPen(QColor("#2a2a2a"), 1))
-                    wave_color = QColor("#808080")
+                    painter.fillPath(path, QColor(20, 20, 20, 180))
+                    painter.setPen(QPen(QColor("#333333"), 1))
+                    wave_color = QColor("#555555")
 
                 painter.drawPath(path)
                 

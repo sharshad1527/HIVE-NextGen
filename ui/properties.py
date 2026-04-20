@@ -475,7 +475,7 @@ class PropertiesPanel(QFrame):
                 continue
 
             if section_title:
-                self._add_section_header(layout, section_title)
+                self._add_section_header(layout, section_title, controls)
 
             for control in controls:
                 ctrl_type = control.get("type", "")
@@ -510,10 +510,69 @@ class PropertiesPanel(QFrame):
         self._block_signals = False
 
 
-    def _add_section_header(self, layout, title):
+    def _add_section_header(self, layout, title, controls):
+        row = QHBoxLayout()
         lbl = QLabel(title)
         lbl.setStyleSheet("color: #d1d1d1; font-size: 11px; font-weight: bold; margin-top: 10px; margin-bottom: 2px;")
-        layout.addWidget(lbl)
+        row.addWidget(lbl)
+        
+        has_animatable = any(c.get("type") in ["slider", "float_spin"] for c in controls)
+        if has_animatable:
+            btn_kf_all = QPushButton("◇")
+            btn_kf_all.setFixedSize(16, 16)
+            btn_kf_all.setCursor(Qt.PointingHandCursor)
+            btn_kf_all.setStyleSheet("""
+                QPushButton { border: none; color: #a0a0a0; font-size: 12px; margin-top: 10px; }
+                QPushButton:hover { color: #ffffff; }
+            """)
+            btn_kf_all.setToolTip(f"Add/Remove Keyframes for all {title} properties")
+            btn_kf_all.clicked.connect(lambda _, c=controls: self._on_section_kf_clicked(c))
+            row.addWidget(btn_kf_all)
+            
+        row.addStretch()
+        layout.addLayout(row)
+
+    def _on_section_kf_clicked(self, controls):
+        if not self.current_clip_obj: return
+        
+        rel_time = self._get_relative_time()
+        
+        any_enabled = False
+        for c in controls:
+            if c.get("type") in ["slider", "float_spin"]:
+                prop = c.get("key")
+                if self.current_clip_obj.is_keyframing_enabled(prop):
+                    any_enabled = True
+                    break
+                    
+        for c in controls:
+            if c.get("type") in ["slider", "float_spin"]:
+                prop = c.get("key")
+                if not any_enabled:
+                    self.current_clip_obj.toggle_keyframing(prop, True)
+                    val = self._get_current_val(prop)
+                    self.current_clip_obj.set_keyframe(prop, rel_time, val)
+                else:
+                    anim_track = self.current_clip_obj.animations.get(prop)
+                    if anim_track:
+                        if hasattr(anim_track, 'remove_keyframe'):
+                            anim_track.remove_keyframe(rel_time)
+                        else:
+                            for kf in anim_track.keyframes[:]:
+                                if abs(kf.time - rel_time) < 0.1:
+                                    anim_track.keyframes.remove(kf)
+                        if not anim_track.keyframes:
+                            anim_track.enabled = False
+
+                if prop in self._dynamic_widgets:
+                    is_enabled = self.current_clip_obj.is_keyframing_enabled(prop)
+                    has_kf_now = self.current_clip_obj.get_keyframe_at_time(prop, rel_time) is not None
+                    self._dynamic_widgets[prop].set_keyframe_state(is_enabled, has_kf_now)
+
+        if hasattr(global_signals, 'clip_updated'):
+            global_signals.clip_updated.emit(self.current_clip_obj)
+        if hasattr(global_signals, 'force_refresh'):
+            global_signals.force_refresh.emit()
 
     def _build_slider(self, layout, key, label, control, values):
         min_val = control.get("min", 0)

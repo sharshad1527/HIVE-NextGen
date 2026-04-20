@@ -154,7 +154,8 @@ DEFAULT_SCHEMAS = {
         {
             "section": "Transform",
             "controls": [
-                {"key": "position", "type": "xy", "min": -9999, "max": 9999, "default_x": 0, "default_y": 0, "label": "Position"},
+                {"key": "Position_X", "type": "slider", "min": -9999, "max": 9999, "default": 0, "label": "Position X"},
+                {"key": "Position_Y", "type": "slider", "min": -9999, "max": 9999, "default": 0, "label": "Position Y"},
                 {"key": "Scale", "type": "slider", "min": 10, "max": 400, "default": 100, "suffix": "%", "label": "Scale"},
                 {"key": "Rotation", "type": "slider", "min": -180, "max": 180, "default": 0, "suffix": "°", "label": "Rotation"},
                 {"key": "Opacity", "type": "slider", "min": 0, "max": 100, "default": 100, "suffix": "%", "label": "Opacity"},
@@ -166,7 +167,8 @@ DEFAULT_SCHEMAS = {
         {
             "section": "Transform",
             "controls": [
-                {"key": "position", "type": "xy", "min": -9999, "max": 9999, "default_x": 0, "default_y": 0, "label": "Position"},
+                {"key": "Position_X", "type": "slider", "min": -9999, "max": 9999, "default": 0, "label": "Position X"},
+                {"key": "Position_Y", "type": "slider", "min": -9999, "max": 9999, "default": 0, "label": "Position Y"},
                 {"key": "Scale", "type": "slider", "min": 10, "max": 400, "default": 100, "suffix": "%", "label": "Scale"},
                 {"key": "Rotation", "type": "slider", "min": -180, "max": 180, "default": 0, "suffix": "°", "label": "Rotation"},
                 {"key": "Opacity", "type": "slider", "min": 0, "max": 100, "default": 100, "suffix": "%", "label": "Opacity"},
@@ -194,7 +196,8 @@ DEFAULT_SCHEMAS = {
         {
             "section": "Transform",
             "controls": [
-                {"key": "position", "type": "xy", "min": -9999, "max": 9999, "default_x": 0, "default_y": 0, "label": "Position"},
+                {"key": "Position_X", "type": "slider", "min": -9999, "max": 9999, "default": 0, "label": "Position X"},
+                {"key": "Position_Y", "type": "slider", "min": -9999, "max": 9999, "default": 0, "label": "Position Y"},
                 {"key": "Scale", "type": "slider", "min": 10, "max": 400, "default": 100, "suffix": "%", "label": "Scale"},
                 {"key": "Rotation", "type": "slider", "min": -180, "max": 180, "default": 0, "suffix": "°", "label": "Rotation"},
                 {"key": "Opacity", "type": "slider", "min": 0, "max": 100, "default": 100, "suffix": "%", "label": "Opacity"},
