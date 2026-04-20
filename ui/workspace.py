@@ -20,15 +20,21 @@ class MediaLoaderThread(QThread):
     item_processed = Signal(dict, str) # dict data, parent_folder
     finished_all = Signal()
     
-    def __init__(self, paths, copy_enabled=False, dest_dir=None, parent_folder=None):
+    def __init__(self, items, copy_enabled=False, dest_dir=None, parent_folder=None):
         super().__init__()
-        self.paths = paths
+        self.items = items
         self.copy_enabled = copy_enabled
         self.dest_dir = dest_dir
-        self.parent_folder = parent_folder
+        self.default_parent = parent_folder
         
     def run(self):
-        for path in self.paths:
+        for item in self.items:
+            if isinstance(item, tuple):
+                path, p_folder = item
+            else:
+                path = item
+                p_folder = self.default_parent
+                
             final_path = path
             
             if self.copy_enabled and self.dest_dir:
@@ -44,7 +50,7 @@ class MediaLoaderThread(QThread):
             
             info = media_manager.process_file(final_path)
             if info:
-                self.item_processed.emit(info, self.parent_folder)
+                self.item_processed.emit(info, p_folder)
                 
         self.finished_all.emit()
 
@@ -769,7 +775,12 @@ class WorkspacePanel(QFrame):
         all_files_to_process = []
         valid_exts = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.wav', '.mp3', '.aac', '.png', '.jpg', '.jpeg', '.webp'}
         
+        processed_roots = set()
         for p in paths:
+            p_norm = p.replace('\\', '/')
+            if p_norm in processed_roots: continue
+            processed_roots.add(p_norm)
+            
             if os.path.exists(p) and os.path.isdir(p):
                 self._add_folder_card(p)
                 # Preload folder contents recursively
@@ -783,19 +794,20 @@ class WorkspacePanel(QFrame):
             self._apply_media_filters_and_sort()
             return
         
-        # Group by parent folder for correct card assignment
-        by_folder = {}
+        processed_files = set()
+        unique_items = []
         for fpath, parent in all_files_to_process:
-            if parent not in by_folder:
-                by_folder[parent] = []
-            by_folder[parent].append(fpath)
+            if fpath in processed_files:
+                continue
+            processed_files.add(fpath)
+            unique_items.append((fpath, parent))
         
-        # Emit loading signal ONCE for the entire batch
-        self._pending_batches = len(by_folder)
+        # Emit loading signal ONCE for the entire batch and use exactly 1 background thread
+        # to process everything sequentially, avoiding OS thread thrashing.
+        self._pending_batches = 1
         self.media_load_started.emit()
         
-        for parent_folder, file_list in by_folder.items():
-            self._process_media_files_async(file_list, False, None, parent_folder=parent_folder, suppress_signals=True)
+        self._process_media_files_async(unique_items, False, None, parent_folder=None, suppress_signals=True)
     
     def _preload_folder_contents(self, folder_path, valid_exts, collect_list):
         """Recursively scan a folder and collect all media files + subfolder cards."""
@@ -846,13 +858,40 @@ class WorkspacePanel(QFrame):
     def _import_folder(self):
         folder_path = QFileDialog.getExistingDirectory(self, "Import Media Folder")
         if folder_path and project_manager.current_project:
+            folder_path = folder_path.replace('\\', '/')
+            if folder_path not in project_manager.current_project.media_bin:
+                project_manager.current_project.media_bin.append(folder_path)
+                project_manager.save_project()
+                
             if not self.current_folder_path:
-                if folder_path not in project_manager.current_project.media_bin:
-                    project_manager.current_project.media_bin.append(folder_path)
-                    project_manager.save_project()
                 self._add_folder_card(folder_path)
-            else:
+                
+            # Fully load project medias on folder add
+            all_files_to_process = []
+            valid_exts = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.wav', '.mp3', '.aac', '.png', '.jpg', '.jpeg', '.webp'}
+            self._preload_folder_contents(folder_path, valid_exts, all_files_to_process)
+            
+            if not all_files_to_process:
                 self._refresh_media_view()
+                return
+                
+            processed_files = set()
+            unique_items = []
+            for fpath, parent in all_files_to_process:
+                if fpath in processed_files: continue
+                processed_files.add(fpath)
+                unique_items.append((fpath, parent))
+                
+            self._bulk_loading = True
+            was_pending = self._pending_batches
+            self._pending_batches += 1
+            
+            if was_pending <= 0:
+                self.media_load_started.emit()
+                
+            self._process_media_files_async(unique_items, False, None, parent_folder=None, suppress_signals=True)
+                
+            self._refresh_media_view()
 
     def _navigate_media_up(self):
         if self.current_folder_path:
