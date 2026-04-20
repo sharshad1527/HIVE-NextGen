@@ -413,6 +413,8 @@ class WorkspacePanel(QFrame):
         self.last_clicked_card = None
         self.all_media_cards = [] 
         self.sort_asc = True
+        self._bulk_loading = False  # Suppresses per-card filter/sort during preload
+        self._pending_batches = 0   # Track outstanding preload batches
         
         self.setStyleSheet("""
             QFrame#Panel {
@@ -587,11 +589,15 @@ class WorkspacePanel(QFrame):
             now_copy_enabled = dialog.chk_copy_media.isChecked()
             app_config.set_setting("copy_media_to_project", now_copy_enabled)
             
-            project_manager.current_project.resolution = dialog.get_resolution()
+            new_resolution = dialog.get_resolution()
+            project_manager.current_project.resolution = new_resolution
             project_manager.current_project.fps = dialog.get_fps()
             
             self._update_settings_labels(project_manager.current_project)
             project_manager.save_project()
+            
+            # Notify the player to sync its aspect ratio
+            global_signals.project_resolution_changed.emit(new_resolution)
             
             if now_copy_enabled and not was_copy_enabled:
                 self._retroactively_copy_media()
@@ -756,12 +762,78 @@ class WorkspacePanel(QFrame):
         self.current_folder_path = None
         self.btn_media_up.hide()
         
+        # Enter bulk loading mode — suppress per-card filter/sort calls
+        self._bulk_loading = True
+        
+        # Collect all folders and their contents recursively for preloading
+        all_files_to_process = []
+        valid_exts = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.wav', '.mp3', '.aac', '.png', '.jpg', '.jpeg', '.webp'}
+        
         for p in paths:
             if os.path.exists(p) and os.path.isdir(p):
                 self._add_folder_card(p)
+                # Preload folder contents recursively
+                self._preload_folder_contents(p, valid_exts, all_files_to_process)
                 
         files_to_process = [p for p in paths if os.path.exists(p) and not os.path.isdir(p)]
-        self._process_media_files_async(files_to_process, False, None, parent_folder=None)
+        all_files_to_process.extend([(f, None) for f in files_to_process])
+        
+        if not all_files_to_process:
+            self._bulk_loading = False
+            self._apply_media_filters_and_sort()
+            return
+        
+        # Group by parent folder for correct card assignment
+        by_folder = {}
+        for fpath, parent in all_files_to_process:
+            if parent not in by_folder:
+                by_folder[parent] = []
+            by_folder[parent].append(fpath)
+        
+        # Emit loading signal ONCE for the entire batch
+        self._pending_batches = len(by_folder)
+        self.media_load_started.emit()
+        
+        for parent_folder, file_list in by_folder.items():
+            self._process_media_files_async(file_list, False, None, parent_folder=parent_folder, suppress_signals=True)
+    
+    def _preload_folder_contents(self, folder_path, valid_exts, collect_list):
+        """Recursively scan a folder and collect all media files + subfolder cards."""
+        folder_path = folder_path.replace('\\', '/')
+        try:
+            for f in os.listdir(folder_path):
+                full_path = os.path.join(folder_path, f).replace('\\', '/')
+                if os.path.isdir(full_path):
+                    self._add_folder_card_with_parent(full_path, folder_path)
+                    # Recurse into subfolders
+                    self._preload_folder_contents(full_path, valid_exts, collect_list)
+                else:
+                    ext = os.path.splitext(f)[1].lower()
+                    if ext in valid_exts:
+                        collect_list.append((full_path, folder_path))
+        except Exception:
+            pass
+    
+    def _add_folder_card_with_parent(self, folder_path, parent_folder):
+        """Add a folder card with explicit parent_folder for preloading."""
+        folder_path = folder_path.replace('\\', '/')
+        parent_folder = parent_folder.replace('\\', '/') if parent_folder else None
+        if any(c.file_path == folder_path for c in self.all_media_cards):
+            return
+            
+        card = DraggableCard(
+            title=os.path.basename(folder_path),
+            icon_name='mdi6.folder',
+            item_type='folder',
+            subtype='folder',
+            file_path=folder_path
+        )
+        card.card_clicked.connect(self._on_media_card_clicked)
+        card.folder_double_clicked.connect(self._on_folder_double_clicked)
+        card.date_added = os.path.getmtime(folder_path)
+        card.parent_folder = parent_folder
+        
+        self.all_media_cards.append(card)
 
     def _import_media_files(self):
         file_paths, _ = QFileDialog.getOpenFileNames(
@@ -817,31 +889,14 @@ class WorkspacePanel(QFrame):
         card.parent_folder = self.current_folder_path
         
         self.all_media_cards.append(card)
-        self._apply_media_filters_and_sort()
+        if not self._bulk_loading:
+            self._apply_media_filters_and_sort()
 
     def _on_folder_double_clicked(self, folder_path):
         self.current_folder_path = folder_path.replace('\\', '/')
         self.btn_media_up.show()
-        self._apply_media_filters_and_sort() # Instantly filter view
-        
-        already_loaded = any((c.parent_folder or "").replace('\\', '/') == self.current_folder_path for c in self.all_media_cards)
-        
-        if not already_loaded:
-            new_paths = []
-            valid_exts = {'.mp4', '.mov', '.avi', '.mkv', '.webm', '.wav', '.mp3', '.aac', '.png', '.jpg', '.jpeg', '.webp'}
-            try:
-                for f in os.listdir(folder_path):
-                    full_path = os.path.join(folder_path, f).replace('\\', '/')
-                    if os.path.isdir(full_path):
-                        self._add_folder_card(full_path)
-                    else:
-                        ext = os.path.splitext(f)[1].lower()
-                        if ext in valid_exts:
-                            new_paths.append(full_path)
-            except Exception:
-                pass
-            if new_paths:
-                self._process_media_files_async(new_paths, False, None, parent_folder=self.current_folder_path)
+        # All folder contents are already preloaded — just filter the view
+        self._apply_media_filters_and_sort()
                 
     def _handle_media_import(self, file_paths):
         copy_enabled = app_config.get_setting("copy_media_to_project", False)
@@ -854,9 +909,11 @@ class WorkspacePanel(QFrame):
             
         self._process_media_files_async(file_paths, copy_enabled, media_dir, parent_folder=self.current_folder_path)
 
-    def _process_media_files_async(self, file_paths, copy_enabled=False, dest_dir=None, parent_folder=None):
+    def _process_media_files_async(self, file_paths, copy_enabled=False, dest_dir=None, parent_folder=None, suppress_signals=False):
         if not file_paths: return
-        self.media_load_started.emit()
+        if not suppress_signals:
+            self._pending_batches = 1
+            self.media_load_started.emit()
         
         thread = MediaLoaderThread(file_paths, copy_enabled, dest_dir, parent_folder)
         self.active_threads.add(thread)
@@ -869,8 +926,14 @@ class WorkspacePanel(QFrame):
         thread.start()
 
     def _on_import_batch_finished(self):
-        project_manager.save_project()
-        self.media_load_finished.emit()
+        self._pending_batches = max(0, self._pending_batches - 1)
+        
+        if self._pending_batches <= 0:
+            # All batches done — exit bulk mode, do one final filter pass, save
+            self._bulk_loading = False
+            self._apply_media_filters_and_sort()
+            project_manager.save_project()
+            self.media_load_finished.emit()
 
     def _add_media_card_to_grid(self, media_info, parent_folder):
         final_path = media_info["path"].replace('\\', '/')
@@ -898,7 +961,8 @@ class WorkspacePanel(QFrame):
         card.card_clicked.connect(self._on_media_card_clicked)
         
         self.all_media_cards.append(card)
-        self._apply_media_filters_and_sort()
+        if not self._bulk_loading:
+            self._apply_media_filters_and_sort()
 
         if media_info["type"] == "video" and app_config.get_setting("auto_proxies", True):
             media_manager.start_proxy_generation(

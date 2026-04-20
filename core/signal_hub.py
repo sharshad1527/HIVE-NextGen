@@ -23,6 +23,9 @@ class SignalHub(QObject):
     
     # Transform Events (Preview Player -> Properties Panel sync)
     clip_transform_changed = Signal(str, str, object)  # clip_id, property_name, new_value
+    
+    # Player Aspect Ratio Events
+    project_resolution_changed = Signal(tuple)  # Emits (width, height) when project resolution changes
 
 # We create ONE global instance of this hub. 
 # Everywhere else in the app, you will just: `from core.signal_hub import global_signals`

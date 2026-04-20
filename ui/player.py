@@ -418,6 +418,16 @@ class PlayerPanel(QFrame):
     playhead_seek_requested = Signal(int)
     resolution_changed = Signal(str) 
 
+    # Aspect ratio presets: label -> (width, height) for shape calculation only
+    ASPECT_PRESETS = {
+        "16:9": (16, 9),
+        "9:16": (9, 16),
+        "4:3": (4, 3),
+        "1:1": (1, 1),
+        "21:9": (21, 9),
+        "4:5": (4, 5),
+    }
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("Panel")
@@ -430,6 +440,9 @@ class PlayerPanel(QFrame):
         self.is_timeline_preview = False
         self.preview_duration = 0
         self.preview_position = 0
+        
+        # Current preview aspect ratio (w, h) — preview only, doesn't change project
+        self._preview_aspect = (16, 9)
 
         self.audio_players = {}
 
@@ -449,8 +462,15 @@ class PlayerPanel(QFrame):
             }
         """)
         
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(15, 15, 15, 15)
+        self._main_layout = QVBoxLayout(self)
+        self._main_layout.setContentsMargins(15, 15, 15, 15)
+
+        # Canvas area — a wrapper that centers the video_container with correct aspect
+        self._canvas_area = QWidget()
+        self._canvas_area.setStyleSheet("background: transparent;")
+        self._canvas_area_layout = QVBoxLayout(self._canvas_area)
+        self._canvas_area_layout.setContentsMargins(0, 0, 0, 0)
+        self._canvas_area_layout.setAlignment(Qt.AlignCenter)
 
         self.video_container = QFrame()
         self.video_container.setStyleSheet("""
@@ -484,7 +504,8 @@ class PlayerPanel(QFrame):
         
         self.media_stack.setCurrentWidget(self.timeline_canvas)
         
-        layout.addWidget(self.video_container, stretch=1)
+        self._canvas_area_layout.addWidget(self.video_container)
+        self._main_layout.addWidget(self._canvas_area, stretch=1)
 
         controls_container = QWidget()
         controls_layout = QVBoxLayout(controls_container)
@@ -505,9 +526,9 @@ class PlayerPanel(QFrame):
         bottom_row = QHBoxLayout()
 
         left_layout = QHBoxLayout()
-        self.combo_res = QComboBox()
-        self.combo_res.addItems(["Full", "1/2", "1/4", "1/8"])
-        self.combo_res.setStyleSheet("""
+        left_layout.setSpacing(6)
+        
+        combo_style = """
             QComboBox {
                 background-color: transparent; border: 1px solid rgba(255,255,255,0.1);
                 border-radius: 4px; color: #808080; padding: 2px 8px; font-size: 10px;
@@ -517,11 +538,25 @@ class PlayerPanel(QFrame):
             QComboBox QAbstractItemView {
                 background-color: #1a1a1a; color: #d1d1d1; selection-background-color: #e66b2c;
             }
-        """)
+        """
+        
+        # Aspect Ratio selector (preview only)
+        self.combo_aspect = QComboBox()
+        self.combo_aspect.addItems(list(self.ASPECT_PRESETS.keys()))
+        self.combo_aspect.setStyleSheet(combo_style)
+        self.combo_aspect.setCursor(Qt.PointingHandCursor)
+        self.combo_aspect.setToolTip("Player Preview Aspect Ratio")
+        self.combo_aspect.currentTextChanged.connect(self._on_aspect_changed)
+        
+        # Render resolution selector
+        self.combo_res = QComboBox()
+        self.combo_res.addItems(["Full", "1/2", "1/4", "1/8"])
+        self.combo_res.setStyleSheet(combo_style)
         self.combo_res.setCursor(Qt.PointingHandCursor)
-        self.combo_res.setToolTip("Timeline Tick Resolution (For heavy projects)")
+        self.combo_res.setToolTip("Render Quality (For heavy projects)")
         self.combo_res.currentTextChanged.connect(self._on_res_changed)
         
+        left_layout.addWidget(self.combo_aspect)
         left_layout.addWidget(self.combo_res)
         left_layout.addStretch(1)
 
@@ -550,7 +585,7 @@ class PlayerPanel(QFrame):
         bottom_row.addLayout(right_layout, 1)  
 
         controls_layout.addLayout(bottom_row)
-        layout.addWidget(controls_container)
+        self._main_layout.addWidget(controls_container)
         
         self.player = QMediaPlayer()
         self.audio_output = QAudioOutput()
@@ -564,6 +599,7 @@ class PlayerPanel(QFrame):
         global_signals.clip_selected.connect(self._on_clip_selected_for_preview)
         global_signals.clip_deselected.connect(self._on_clip_deselected_for_preview)
         global_signals.clip_transform_changed.connect(self._on_property_changed_rerender)
+        global_signals.project_resolution_changed.connect(self._on_project_resolution_changed)
         
         if QApplication.instance():
             QApplication.instance().aboutToQuit.connect(self._cleanup)
@@ -582,6 +618,60 @@ class PlayerPanel(QFrame):
 
     def _on_timeline_frame_received(self, frame):
         self.timeline_canvas.set_frame(frame)
+
+    def _on_aspect_changed(self, aspect_text):
+        """Preview-only aspect ratio change — reshapes canvas without modifying project."""
+        if aspect_text in self.ASPECT_PRESETS:
+            self._preview_aspect = self.ASPECT_PRESETS[aspect_text]
+            self._update_canvas_size()
+            # Re-render current frame to fit new shape
+            self.render_engine.request_frame(int(self.playhead))
+
+    def _on_project_resolution_changed(self, resolution):
+        """Called when project settings change resolution — sync the aspect ratio combo."""
+        w, h = resolution
+        # Find the best matching aspect preset
+        best_match = "16:9"  # default fallback
+        target_ratio = w / h if h > 0 else 1.78
+        min_diff = float('inf')
+        for label, (aw, ah) in self.ASPECT_PRESETS.items():
+            diff = abs((aw / ah) - target_ratio)
+            if diff < min_diff:
+                min_diff = diff
+                best_match = label
+        
+        self.combo_aspect.blockSignals(True)
+        self.combo_aspect.setCurrentText(best_match)
+        self.combo_aspect.blockSignals(False)
+        self._preview_aspect = self.ASPECT_PRESETS[best_match]
+        self._update_canvas_size()
+        self.render_engine.request_frame(int(self.playhead))
+
+    def _update_canvas_size(self):
+        """Resize video_container to fit the current aspect ratio within available space."""
+        available_w = self._canvas_area.width()
+        available_h = self._canvas_area.height()
+        if available_w <= 0 or available_h <= 0:
+            return
+        
+        aspect_w, aspect_h = self._preview_aspect
+        aspect_ratio = aspect_w / aspect_h
+        
+        # Calculate max size that fits within available space maintaining aspect ratio
+        if available_w / available_h > aspect_ratio:
+            # Available space is wider than needed — height-limited
+            canvas_h = available_h
+            canvas_w = int(canvas_h * aspect_ratio)
+        else:
+            # Available space is taller than needed — width-limited
+            canvas_w = available_w
+            canvas_h = int(canvas_w / aspect_ratio)
+        
+        self.video_container.setFixedSize(max(1, canvas_w), max(1, canvas_h))
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._update_canvas_size)
 
     def _on_res_changed(self, res_text):
         if res_text == "Full":
