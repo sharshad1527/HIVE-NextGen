@@ -108,7 +108,7 @@ class FontDownloadDialog(QDialog):
         
         btn_close = QPushButton(qta.icon('mdi6.close', color='#808080'), "")
         btn_close.setFixedSize(24, 24)
-        btn_close.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: #e81123; border-radius: 4px; }")
+        btn_close.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: #ff3b30; border-radius: 4px; }")
         btn_close.clicked.connect(self.close)
         
         title_layout.addWidget(lbl_title)
@@ -253,7 +253,7 @@ class FontDownloadDialog(QDialog):
     def _on_failed(self, name, error):
         self.progress.hide()
         self.lbl_status.setText(f"  ✗ {name}: {error}")
-        self.lbl_status.setStyleSheet("color: #e81123; font-size: 10px; border: none;")
+        self.lbl_status.setStyleSheet("color: #ff3b30; font-size: 10px; border: none;")
     
     def _filter_fonts(self, text):
         text_lower = text.lower()

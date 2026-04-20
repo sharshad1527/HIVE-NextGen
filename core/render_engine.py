@@ -217,7 +217,7 @@ class RenderEngine(QThread):
                             
                         active_clip_ids.add(clip.clip_id)
                         painter.end()
-                        canvas = self._apply_track_effect(canvas, clip, render_w, render_h)
+                        canvas = self._apply_track_effect(canvas, clip, render_w, render_h, current_ms)
                         painter = QPainter(canvas)
                         if self._render_scale < 1.0:
                             painter.setRenderHint(QPainter.Antialiasing, False)
@@ -250,7 +250,7 @@ class RenderEngine(QThread):
         painter.end()
         return canvas, active_clip_ids
 
-    def _apply_track_effect(self, canvas, effect_clip, render_w, render_h):
+    def _apply_track_effect(self, canvas, effect_clip, render_w, render_h, current_ms):
         """Applies a standalone effect-track clip to the entire QImage canvas via OpenCV."""
         if not CV2_AVAILABLE:
             return canvas
@@ -263,7 +263,7 @@ class RenderEngine(QThread):
         bgr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
         
         # Apply effects using existing _apply_cv_effects pipeline
-        bgr = self._apply_cv_effects(bgr, effect_clip)
+        bgr = self._apply_cv_effects(bgr, effect_clip, current_ms)
         
         # Convert back to QImage
         bgr = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
@@ -323,7 +323,7 @@ class RenderEngine(QThread):
 
             if ret:
                 # Apply pixel-level effects before converting to QImage
-                frame = self._apply_cv_effects(frame, clip)
+                frame = self._apply_cv_effects(frame, clip, current_ms)
                 
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = frame.shape
@@ -335,7 +335,7 @@ class RenderEngine(QThread):
             if img is not None:
                 # Apply pixel-level effects
                 if len(img.shape) == 3 and img.shape[2] == 4:
-                    img = self._apply_cv_effects(img, clip, has_alpha=True)
+                    img = self._apply_cv_effects(img, clip, current_ms, has_alpha=True)
                     img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
                     h, w, ch = img.shape
                     bytes_per_line = ch * w
@@ -343,7 +343,7 @@ class RenderEngine(QThread):
                 else:
                     if len(img.shape) == 2:
                         img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-                    img = self._apply_cv_effects(img, clip)
+                    img = self._apply_cv_effects(img, clip, current_ms)
                     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
                     h, w, ch = img.shape
                     bytes_per_line = ch * w
@@ -352,11 +352,20 @@ class RenderEngine(QThread):
         if qimg and not qimg.isNull():
             props = clip.applied_effects or {}
             
-            scale_pct = props.get("Scale", 100) / 100.0
-            pos_x = props.get("Position_X", 0)
-            pos_y = props.get("Position_Y", 0)
-            rotation = props.get("Rotation", 0)
-            opacity = props.get("Opacity", 100) / 100.0
+            # --- EVALUATE KEYFRAMES DYNAMICALLY ---
+            if hasattr(clip, 'get_animated_value'):
+                rel_time = max(0.0, (current_ms - clip.start_time) / 10.0)
+                scale_pct = clip.get_animated_value("Scale", rel_time, props.get("Scale", 100)) / 100.0
+                pos_x = clip.get_animated_value("Position_X", rel_time, props.get("Position_X", 0))
+                pos_y = clip.get_animated_value("Position_Y", rel_time, props.get("Position_Y", 0))
+                rotation = clip.get_animated_value("Rotation", rel_time, props.get("Rotation", 0))
+                opacity = clip.get_animated_value("Opacity", rel_time, props.get("Opacity", 100)) / 100.0
+            else:
+                scale_pct = props.get("Scale", 100) / 100.0
+                pos_x = props.get("Position_X", 0)
+                pos_y = props.get("Position_Y", 0)
+                rotation = props.get("Rotation", 0)
+                opacity = props.get("Opacity", 100) / 100.0
             
             # Transition Playback Support 
             trans_in = props.get("transition_in")
@@ -456,10 +465,17 @@ class RenderEngine(QThread):
             painter.drawImage(QRectF(-draw_w / 2, -draw_h / 2, draw_w, draw_h), qimg, source_rect)
             painter.restore()
 
-    def _apply_cv_effects(self, frame, clip, has_alpha=False):
-        """Apply OpenCV-based visual effects to a frame based on clip's applied_effects."""
+    def _apply_cv_effects(self, frame, clip, current_ms=0, has_alpha=False):
+        """Apply OpenCV-based visual effects to a frame based on clip's applied_effects with Keyframes."""
         if not isinstance(clip.applied_effects, dict):
             return frame
+            
+        rel_time = max(0.0, (current_ms - clip.start_time) / 10.0)
+        
+        def get_val(key, default):
+            if hasattr(clip, 'get_animated_value'):
+                return clip.get_animated_value(key, rel_time, clip.applied_effects.get(key, default))
+            return clip.applied_effects.get(key, default)
         
         effects_list = clip.applied_effects.get("applied_effects", [])
         if isinstance(effects_list, str):
@@ -467,7 +483,6 @@ class RenderEngine(QThread):
         elif not isinstance(effects_list, list):
             effects_list = []
         
-        # Also check for primary_effect key
         primary = clip.applied_effects.get("primary_effect", "")
         if primary and primary not in effects_list:
             effects_list.append(primary)
@@ -475,38 +490,44 @@ class RenderEngine(QThread):
         if not effects_list:
             return frame
         
-        amount = clip.applied_effects.get("effect_amount", 100) / 100.0
+        amount = get_val("effect_amount", 100) / 100.0
         
         for effect_name in effects_list:
             effect_lower = effect_name.lower()
             
             if "blur" in effect_lower or "gaussian" in effect_lower:
-                frame = self._fx_blur(frame, amount, clip.applied_effects)
+                frame = self._fx_blur(frame, amount, clip.applied_effects, clip, rel_time)
             elif "glow" in effect_lower or "cinematic" in effect_lower:
-                frame = self._fx_glow(frame, amount, clip.applied_effects)
+                frame = self._fx_glow(frame, amount, clip.applied_effects, clip, rel_time)
             elif "vignette" in effect_lower:
-                frame = self._fx_vignette(frame, amount, clip.applied_effects)
+                frame = self._fx_vignette(frame, amount, clip.applied_effects, clip, rel_time)
             elif "color" in effect_lower and "grade" in effect_lower:
-                frame = self._fx_color_grade(frame, amount, clip.applied_effects)
+                frame = self._fx_color_grade(frame, amount, clip.applied_effects, clip, rel_time)
             elif "vhs" in effect_lower:
-                frame = self._fx_vhs(frame, amount, clip.applied_effects)
+                frame = self._fx_vhs(frame, amount, clip.applied_effects, clip, rel_time)
             elif "glitch" in effect_lower:
-                frame = self._fx_glitch(frame, amount, clip.applied_effects)
+                frame = self._fx_glitch(frame, amount, clip.applied_effects, clip, rel_time)
         
         return frame
     
-    def _fx_blur(self, frame, amount, props):
-        """Gaussian blur effect."""
-        radius = int(props.get("radius", 15) * amount)
+    def _fx_blur(self, frame, amount, props, clip, rel_time):
+        radius_base = props.get("radius", 15)
+        if hasattr(clip, 'get_animated_value'):
+            radius_base = clip.get_animated_value("radius", rel_time, radius_base)
+            
+        radius = int(radius_base * amount)
         if radius < 1:
             return frame
         # Kernel must be odd
         k = max(1, radius) | 1
         return cv2.GaussianBlur(frame, (k, k), 0)
     
-    def _fx_glow(self, frame, amount, props):
-        """Cinematic glow/bloom effect — bright areas bleed outward."""
-        radius = int(props.get("radius", 30) * amount)
+    def _fx_glow(self, frame, amount, props, clip, rel_time):
+        radius_base = props.get("radius", 30)
+        if hasattr(clip, 'get_animated_value'):
+            radius_base = clip.get_animated_value("radius", rel_time, radius_base)
+            
+        radius = int(radius_base * amount)
         if radius < 1:
             return frame
         k = max(1, radius) | 1
@@ -523,11 +544,18 @@ class RenderEngine(QThread):
             return frame
         return result
     
-    def _fx_vignette(self, frame, amount, props):
-        """Radial vignette darkening toward edges."""
+    def _fx_vignette(self, frame, amount, props, clip, rel_time):
         h, w = frame.shape[:2]
-        radius_pct = props.get("radius", 70) / 100.0
-        softness = props.get("softness", 50) / 100.0
+        
+        rad_base = props.get("radius", 70)
+        soft_base = props.get("softness", 50)
+        
+        if hasattr(clip, 'get_animated_value'):
+            rad_base = clip.get_animated_value("radius", rel_time, rad_base)
+            soft_base = clip.get_animated_value("softness", rel_time, soft_base)
+            
+        radius_pct = rad_base / 100.0
+        softness = soft_base / 100.0
         
         # Create radial gradient mask
         Y, X = np.ogrid[:h, :w]
@@ -550,11 +578,19 @@ class RenderEngine(QThread):
         result = (frame.astype(np.float32) * mask_3d).astype(np.uint8)
         return result
     
-    def _fx_color_grade(self, frame, amount, props):
-        """Brightness, contrast, and saturation adjustments."""
-        brightness = props.get("brightness", 0) * amount
-        contrast = props.get("contrast", 10) * amount
-        saturation = props.get("saturation", 15) * amount
+    def _fx_color_grade(self, frame, amount, props, clip, rel_time):
+        b_base = props.get("brightness", 0)
+        c_base = props.get("contrast", 10)
+        s_base = props.get("saturation", 15)
+        
+        if hasattr(clip, 'get_animated_value'):
+            b_base = clip.get_animated_value("brightness", rel_time, b_base)
+            c_base = clip.get_animated_value("contrast", rel_time, c_base)
+            s_base = clip.get_animated_value("saturation", rel_time, s_base)
+            
+        brightness = b_base * amount
+        contrast = c_base * amount
+        saturation = s_base * amount
         
         work = frame[:, :, :3] if frame.shape[2] >= 3 else frame
         result = work.astype(np.float32)
@@ -579,26 +615,31 @@ class RenderEngine(QThread):
             return frame
         return result
     
-    def _fx_vhs(self, frame, amount, props):
-        """VHS retro effect with scanlines and chromatic aberration."""
+    def _fx_vhs(self, frame, amount, props, clip, rel_time):
         h, w = frame.shape[:2]
         work = frame[:, :, :3] if frame.shape[2] >= 3 else frame
         result = work.copy()
         
-        # Chromatic aberration (shift R and B channels)
-        shift = int(props.get("chromatic_shift", 5) * amount)
+        cs_base = props.get("chromatic_shift", 5)
+        so_base = props.get("scanline_opacity", 40)
+        n_base = props.get("noise", 30)
+        
+        if hasattr(clip, 'get_animated_value'):
+            cs_base = clip.get_animated_value("chromatic_shift", rel_time, cs_base)
+            so_base = clip.get_animated_value("scanline_opacity", rel_time, so_base)
+            n_base = clip.get_animated_value("noise", rel_time, n_base)
+            
+        shift = int(cs_base * amount)
         if shift > 0:
             result[:, shift:, 2] = work[:, :-shift, 2]  # Blue channel shift right
             result[:, :-shift, 0] = work[:, shift:, 0]  # Red channel shift left
         
-        # Scanlines
-        scanline_opacity = props.get("scanline_opacity", 40) / 100.0 * amount
+        scanline_opacity = so_base / 100.0 * amount
         if scanline_opacity > 0:
             for y in range(0, h, 2):
                 result[y, :] = (result[y, :].astype(np.float32) * (1 - scanline_opacity * 0.5)).astype(np.uint8)
         
-        # Noise
-        noise_amount = props.get("noise", 30) / 100.0 * amount
+        noise_amount = n_base / 100.0 * amount
         if noise_amount > 0:
             noise = np.random.randint(-25, 25, result.shape, dtype=np.int16)
             result = np.clip(result.astype(np.int16) + (noise * noise_amount).astype(np.int16), 0, 255).astype(np.uint8)
@@ -608,13 +649,19 @@ class RenderEngine(QThread):
             return frame
         return result
     
-    def _fx_glitch(self, frame, amount, props):
-        """Digital glitch effect — random horizontal block displacement."""
+    def _fx_glitch(self, frame, amount, props, clip, rel_time):
         h, w = frame.shape[:2]
         work = frame.copy()
         
-        block_size = max(2, int(props.get("block_size", 10)))
-        shift_amount = int(props.get("shift_amount", 20) * amount)
+        bs_base = props.get("block_size", 10)
+        sa_base = props.get("shift_amount", 20)
+        
+        if hasattr(clip, 'get_animated_value'):
+            bs_base = clip.get_animated_value("block_size", rel_time, bs_base)
+            sa_base = clip.get_animated_value("shift_amount", rel_time, sa_base)
+            
+        block_size = max(2, int(bs_base))
+        shift_amount = int(sa_base * amount)
         
         if shift_amount < 1:
             return frame
@@ -705,17 +752,36 @@ class RenderEngine(QThread):
             text = text[:visible_chars]
         
         font_family = props.get("Font Family", "Arial")
-        font_size = max(1, int(props.get("Font Size", 80)))
         color_hex = props.get("Text Color", "#FFFFFF")
-        pos_x = props.get("Position_X", 0)
-        pos_y = props.get("Position_Y", 0)
-        opacity = props.get("Opacity", 100) / 100.0
-        rotation = props.get("Rotation", 0)
-        scale_pct = props.get("Scale", 100) / 100.0
-        outline_width = props.get("outline_width", 2)
         outline_color = props.get("outline_color", "#000000")
         bg_color_hex = props.get("Bg Color", "transparent")
-        bg_opacity = props.get("bg_opacity", 0) / 100.0
+        
+        font_size_base = max(1, int(props.get("Font Size", 80)))
+        outline_width_base = props.get("outline_width", 2)
+        bg_opacity_base = props.get("bg_opacity", 0)
+        
+        # --- EVALUATE KEYFRAMES DYNAMICALLY ---
+        if hasattr(clip, 'get_animated_value'):
+            rel_time = max(0.0, (current_ms - clip.start_time) / 10.0)
+            pos_x = clip.get_animated_value("Position_X", rel_time, props.get("Position_X", 0))
+            pos_y = clip.get_animated_value("Position_Y", rel_time, props.get("Position_Y", 0))
+            opacity = clip.get_animated_value("Opacity", rel_time, props.get("Opacity", 100)) / 100.0
+            rotation = clip.get_animated_value("Rotation", rel_time, props.get("Rotation", 0))
+            scale_pct = clip.get_animated_value("Scale", rel_time, props.get("Scale", 100)) / 100.0
+            
+            font_size = max(1, int(clip.get_animated_value("Font Size", rel_time, font_size_base)))
+            outline_width = clip.get_animated_value("outline_width", rel_time, outline_width_base)
+            bg_opacity = clip.get_animated_value("bg_opacity", rel_time, bg_opacity_base) / 100.0
+        else:
+            pos_x = props.get("Position_X", 0)
+            pos_y = props.get("Position_Y", 0)
+            opacity = props.get("Opacity", 100) / 100.0
+            rotation = props.get("Rotation", 0)
+            scale_pct = props.get("Scale", 100) / 100.0
+            
+            font_size = font_size_base
+            outline_width = outline_width_base
+            bg_opacity = bg_opacity_base / 100.0
         
         # Pop-up Animation
         animation = props.get("animation", "Scale In")

@@ -2,8 +2,8 @@
 """
 Dynamic, data-driven Properties Panel.
 Builds its UI from JSON control schemas — presets define what appears,
-effects can inject/hide controls. The panel is the "controller";
-presets & effects are "joysticks".
+effects can inject/hide controls. Integrated with Animatable Keyframing and
+playhead synchronization to support dynamically inserted CapCut-style features.
 """
 
 import qtawesome as qta
@@ -20,18 +20,111 @@ from core.control_schema import get_schema_for_clip
 from ui.font_picker import FontPickerButton
 
 
+class AnimatableProperty(QWidget):
+    """A wrapper for an animatable property slider with a CapCut-style diamond keyframe toggle."""
+    valueChanged = Signal(float)
+    
+    def __init__(self, name: str, property_key: str, min_val: float, max_val: float, is_int: bool = False):
+        super().__init__()
+        self.property_key = property_key
+        self.is_int = is_int
+        
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        
+        self.label = QLabel(name)
+        self.label.setStyleSheet("color: #808080; font-size: 10px;")
+        row.addWidget(self.label)
+        row.addStretch()
+        
+        controls = QWidget()
+        controls.setFixedWidth(180) 
+        controls_layout = QHBoxLayout(controls)
+        controls_layout.setContentsMargins(0, 0, 0, 0)
+        controls_layout.setSpacing(8)
+        
+        self.keyframe_btn = QPushButton("◇")
+        self.keyframe_btn.setFixedSize(20, 20)
+        self.keyframe_btn.setCursor(Qt.PointingHandCursor)
+        self.keyframe_btn.setStyleSheet("""
+            QPushButton { border: none; font-size: 14px; color: gray; }
+        """)
+        controls_layout.addWidget(self.keyframe_btn)
+        
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setMinimum(int(min_val * 100) if not is_int else min_val)
+        self.slider.setMaximum(int(max_val * 100) if not is_int else max_val)
+        controls_layout.addWidget(self.slider)
+        
+        if is_int:
+            self.spin_box = QSpinBox()
+        else:
+            self.spin_box = QDoubleSpinBox()
+            self.spin_box.setDecimals(2)
+            self.spin_box.setSingleStep(0.1)
+        
+        self.spin_box.setMinimum(min_val)
+        self.spin_box.setMaximum(max_val)
+        self.spin_box.setFixedWidth(65)
+        self.spin_box.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        controls_layout.addWidget(self.spin_box)
+        
+        row.addWidget(controls)
+        
+        self.slider.valueChanged.connect(self._on_slider_changed)
+        self.spin_box.valueChanged.connect(self._on_spin_box_changed)
+        
+        self._is_updating = False
+
+    def _on_slider_changed(self, val):
+        if self._is_updating: return
+        self._is_updating = True
+        real_val = val if self.is_int else val / 100.0
+        self.spin_box.setValue(real_val)
+        self.valueChanged.emit(real_val)
+        self._is_updating = False
+
+    def _on_spin_box_changed(self, val):
+        if self._is_updating: return
+        self._is_updating = True
+        slider_val = val if self.is_int else int(val * 100)
+        self.slider.setValue(slider_val)
+        self.valueChanged.emit(val)
+        self._is_updating = False
+
+    def set_value(self, val):
+        self._is_updating = True
+        if self.is_int:
+            self.spin_box.setValue(val)
+            self.slider.setValue(val)
+        else:
+            self.spin_box.setValue(val)
+            self.slider.setValue(int(val * 100))
+        self._is_updating = False
+
+    def set_keyframe_state(self, active: bool, has_keyframe_here: bool):
+        if has_keyframe_here:
+            self.keyframe_btn.setText("◆")
+            self.keyframe_btn.setStyleSheet("QPushButton { border: none; font-size: 14px; color: #e66b2c; }")
+        else:
+            self.keyframe_btn.setText("◇")
+            color = '#e66b2c' if active else 'gray'
+            self.keyframe_btn.setStyleSheet(f"QPushButton {{ border: none; font-size: 14px; color: {color}; }}")
+
+
 class PropertiesPanel(QFrame):
-    # Emits item_id, property_name, new_value, save_state(bool)
     property_changed = Signal(str, str, object, bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("Panel")
+        self.current_clip_obj = None
         self.current_item_id = ""
         self.current_item_props = {}
         self.current_sub_type = ""
+        self.current_playhead_time = 0.0
         self._block_signals = False
-        self._dynamic_widgets = {}  # key -> widget mapping for current schema
+        self._dynamic_widgets = {}  
 
         self.setStyleSheet("""
             QFrame#Panel {
@@ -41,7 +134,6 @@ class PropertiesPanel(QFrame):
             }
         """)
 
-        # --- Shared Styles ---
         self.input_style = """
             QLineEdit {
                 background-color: rgba(26, 26, 26, 0.8); border: 1px solid rgba(255,255,255,0.1);
@@ -118,11 +210,9 @@ class PropertiesPanel(QFrame):
             QCheckBox::indicator:checked { background-color: #e66b2c; border: 1px solid #e66b2c; }
         """
 
-        # --- Layout ---
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # Header
         header = QWidget()
         header.setStyleSheet("border-bottom: 1px solid rgba(255, 255, 255, 0.05);")
         header_layout = QHBoxLayout(header)
@@ -138,28 +228,29 @@ class PropertiesPanel(QFrame):
         header_layout.addStretch()
         layout.addWidget(header)
 
-        # Dynamic content area
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setStyleSheet(self.scroll_style)
         layout.addWidget(self.scroll)
 
-        # Empty page (default)
         self._show_empty_page()
 
-        # Connect signals
         global_signals.clip_selected.connect(self.on_clip_selected)
         global_signals.clip_deselected.connect(self.on_clip_deselected)
 
         if hasattr(global_signals, 'clip_transform_changed'):
             global_signals.clip_transform_changed.connect(self._on_external_transform)
 
-    # ================================================================
-    # Signal Handlers
-    # ================================================================
+        if hasattr(global_signals, 'playhead_moved'):
+            global_signals.playhead_moved.connect(self.sync_to_playhead)
+        if hasattr(global_signals, 'add_keyframe_requested'):
+            global_signals.add_keyframe_requested.connect(self.add_keyframe_at_playhead)
+
+    def _get_relative_time(self):
+        if not self.current_clip_obj: return 0.0
+        return max(0.0, self.current_playhead_time - (self.current_clip_obj.start_time / 10.0))
 
     def on_clip_selected(self, item_type: str, clip_id: str):
-        """Triggered when Timeline signals clip_selected."""
         if not project_manager.current_project:
             return
 
@@ -174,13 +265,13 @@ class PropertiesPanel(QFrame):
 
         if selected_clip:
             self.current_track = track.track_id
+            self.current_clip_obj = selected_clip
             self.populate_ui(selected_clip, item_type)
 
     def on_clip_deselected(self):
         self.clear_ui()
 
     def populate_ui(self, clip_data, explicit_item_type=None):
-        """Reads clip data and dynamically builds the properties UI from schema."""
         props = clip_data.applied_effects if isinstance(clip_data.applied_effects, dict) else {}
         item_type = explicit_item_type if explicit_item_type else clip_data.clip_type
 
@@ -188,10 +279,8 @@ class PropertiesPanel(QFrame):
         self.current_item_props = props
         self.current_sub_type = item_type
 
-        # Resolve the controls schema
         schema = get_schema_for_clip(item_type, props)
 
-        # Update header
         type_info = {
             'caption':        ("Text Properties", 'mdi6.format-text'),
             'video':          ("Video Properties", 'mdi6.movie-open-outline'),
@@ -211,19 +300,19 @@ class PropertiesPanel(QFrame):
             self._show_empty_page()
             return
 
-        # Build the dynamic UI
         self._build_dynamic_ui(schema, props)
+        self.sync_to_playhead(self.current_playhead_time)
 
     def clear_ui(self):
         self.current_item_id = ""
         self.current_item_props = {}
         self.current_sub_type = ""
+        self.current_clip_obj = None
         self.lbl_title.setText("Properties")
         self.lbl_icon.setPixmap(qta.icon('mdi6.cog-outline', color='#e66b2c').pixmap(14, 14))
         self._show_empty_page()
 
     def show_properties(self, item_type, item_id, item_props):
-        """Legacy compatibility wrapper. Still called by timeline item_clicked signal."""
         self.current_item_id = item_id
         self.current_item_props = item_props
         self.current_sub_type = item_type
@@ -232,7 +321,6 @@ class PropertiesPanel(QFrame):
             self.clear_ui()
             return
 
-        # Build a minimal clip-like dict for schema resolution
         clip_data_dict = dict(item_props) if isinstance(item_props, dict) else {}
         schema = get_schema_for_clip(item_type, clip_data_dict)
 
@@ -255,9 +343,107 @@ class PropertiesPanel(QFrame):
         else:
             self.clear_ui()
 
-    # ================================================================
-    # Dynamic UI Builder
-    # ================================================================
+    def sync_to_playhead(self, time: float):
+        self.current_playhead_time = time
+        if not self.current_clip_obj:
+            return
+            
+        rel_time = self._get_relative_time()
+            
+        for key, widget in self._dynamic_widgets.items():
+            if isinstance(widget, AnimatableProperty):
+                if hasattr(self.current_clip_obj, 'get_animated_value'):
+                    fallback_val = getattr(self.current_clip_obj, key, None)
+                    if fallback_val is None and isinstance(self.current_clip_obj.applied_effects, dict):
+                        fallback_val = self.current_clip_obj.applied_effects.get(key, widget.slider.value())
+                    if fallback_val is None:
+                        fallback_val = widget.slider.value()
+                        
+                    current_val = self.current_clip_obj.get_animated_value(key, rel_time, fallback_val)
+                    widget.set_value(current_val)
+                
+                if hasattr(self.current_clip_obj, 'is_keyframing_enabled'):
+                    is_enabled = self.current_clip_obj.is_keyframing_enabled(key)
+                    has_kf = self.current_clip_obj.get_keyframe_at_time(key, rel_time) is not None
+                    widget.set_keyframe_state(is_enabled, has_kf)
+
+    def _on_animatable_prop_change(self, prop_name: str, value: float):
+        if not self.current_clip_obj: return
+        
+        setattr(self.current_clip_obj, prop_name, value)
+        
+        if hasattr(self.current_clip_obj, 'is_keyframing_enabled') and self.current_clip_obj.is_keyframing_enabled(prop_name):
+            rel_time = self._get_relative_time()
+            self.current_clip_obj.set_keyframe(prop_name, rel_time, value)
+            if prop_name in self._dynamic_widgets:
+                self._dynamic_widgets[prop_name].set_keyframe_state(True, True) 
+        
+        self._on_prop_change(prop_name, value, commit=True)
+        
+        if hasattr(global_signals, 'clip_updated'):
+            global_signals.clip_updated.emit(self.current_clip_obj)
+        if hasattr(global_signals, 'force_refresh'):
+            global_signals.force_refresh.emit()
+
+    def _get_current_val(self, prop_name):
+        """Safely extracts the absolute current value if missing from native attributes."""
+        val = getattr(self.current_clip_obj, prop_name, None)
+        if val is None and isinstance(self.current_clip_obj.applied_effects, dict):
+            val = self.current_clip_obj.applied_effects.get(prop_name, None)
+        if val is None and prop_name in self._dynamic_widgets:
+            w = self._dynamic_widgets[prop_name]
+            if isinstance(w, AnimatableProperty):
+                val = w.spin_box.value()
+        return val if val is not None else 0
+
+    def _on_keyframe_clicked(self, prop_name: str):
+        """Clicking the Diamond Toggle explicitly adds or removes keyframes."""
+        if not self.current_clip_obj or not hasattr(self.current_clip_obj, 'toggle_keyframing'): return
+        
+        rel_time = self._get_relative_time()
+        is_enabled = self.current_clip_obj.is_keyframing_enabled(prop_name)
+        existing_kf = self.current_clip_obj.get_keyframe_at_time(prop_name, rel_time)
+        
+        if not is_enabled:
+            self.current_clip_obj.toggle_keyframing(prop_name, True)
+            val = self._get_current_val(prop_name)
+            self.current_clip_obj.set_keyframe(prop_name, rel_time, val)
+        else:
+            if existing_kf:
+                anim_track = self.current_clip_obj.animations[prop_name]
+                if hasattr(anim_track, 'remove_keyframe'):
+                    anim_track.remove_keyframe(rel_time)
+                else:
+                    anim_track.keyframes.remove(existing_kf)
+                
+                if not anim_track.keyframes:
+                    anim_track.enabled = False
+            else:
+                val = self._get_current_val(prop_name)
+                self.current_clip_obj.set_keyframe(prop_name, rel_time, val)
+                
+        self.sync_to_playhead(self.current_playhead_time)
+        
+        if hasattr(global_signals, 'clip_updated'):
+            global_signals.clip_updated.emit(self.current_clip_obj)
+        if hasattr(global_signals, 'force_refresh'):
+            global_signals.force_refresh.emit()
+
+    def add_keyframe_at_playhead(self):
+        if not self.current_clip_obj or not hasattr(self.current_clip_obj, 'is_keyframing_enabled'): return
+        
+        rel_time = self._get_relative_time()
+        for prop, widget in self._dynamic_widgets.items():
+            if isinstance(widget, AnimatableProperty) and self.current_clip_obj.is_keyframing_enabled(prop):
+                val = getattr(self.current_clip_obj, prop, 0)
+                self.current_clip_obj.set_keyframe(prop, rel_time, val)
+                widget.set_keyframe_state(True, True)
+                
+        if hasattr(global_signals, 'clip_updated'):
+            global_signals.clip_updated.emit(self.current_clip_obj)
+        if hasattr(global_signals, 'force_refresh'):
+            global_signals.force_refresh.emit()
+
 
     def _show_empty_page(self):
         widget = QWidget()
@@ -271,7 +457,6 @@ class PropertiesPanel(QFrame):
         self._dynamic_widgets.clear()
 
     def _build_dynamic_ui(self, schema: list, current_values: dict):
-        """Builds the entire properties UI from a controls_schema list."""
         self._block_signals = True
         self._dynamic_widgets.clear()
 
@@ -289,11 +474,9 @@ class PropertiesPanel(QFrame):
             if not controls:
                 continue
 
-            # Section header
             if section_title:
                 self._add_section_header(layout, section_title)
 
-            # Build each control
             for control in controls:
                 ctrl_type = control.get("type", "")
                 key = control.get("key", "")
@@ -320,13 +503,12 @@ class PropertiesPanel(QFrame):
                 elif ctrl_type == "effect_dropdown":
                     self._build_effect_dropdown(layout, key, label, current_values)
 
+        self._build_mirror_toggles(layout)
+
         layout.addStretch()
         self.scroll.setWidget(content)
         self._block_signals = False
 
-    # ================================================================
-    # Control Builders
-    # ================================================================
 
     def _add_section_header(self, layout, title):
         lbl = QLabel(title)
@@ -340,48 +522,24 @@ class PropertiesPanel(QFrame):
         suffix = control.get("suffix", "")
         current = values.get(key, default)
 
-        row = QHBoxLayout()
-        lbl = QLabel(label)
-        lbl.setStyleSheet("color: #808080; font-size: 10px;")
-        row.addWidget(lbl)
-        row.addStretch()
+        is_int = isinstance(default, int) and isinstance(min_val, int)
 
-        controls = QWidget()
-        controls.setFixedWidth(160)
-        controls_layout = QHBoxLayout(controls)
-        controls_layout.setContentsMargins(0, 0, 0, 0)
-        controls_layout.setSpacing(8)
+        prop_widget = AnimatableProperty(label, key, min_val, max_val, is_int)
+        prop_widget.set_value(current)
 
-        slider = QSlider(Qt.Horizontal)
-        slider.setRange(min_val, max_val)
-        slider.setValue(int(current))
-        slider.setStyleSheet(self.slider_style)
+        if not hasattr(self.current_clip_obj, 'is_keyframing_enabled'):
+            prop_widget.keyframe_btn.hide()
 
-        spin = QSpinBox()
-        spin.setRange(min_val, max_val)
-        spin.setValue(int(current))
+        prop_widget.slider.setStyleSheet(self.slider_style)
+        prop_widget.spin_box.setStyleSheet(self.spinbox_style)
         if suffix:
-            spin.setSuffix(suffix if suffix.startswith(" ") else f" {suffix}")
-        spin.setFixedWidth(75)
-        spin.setStyleSheet(self.spinbox_style)
-        spin.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        
-        # Cross-couple slider and spinbox
-        slider.valueChanged.connect(spin.setValue)
-        spin.valueChanged.connect(slider.setValue)
+            prop_widget.spin_box.setSuffix(suffix if suffix.startswith(" ") else f" {suffix}")
 
-        # Value emits
-        slider.sliderReleased.connect(lambda s=slider, k=key: self._on_prop_change(k, s.value(), commit=True))
-        slider.valueChanged.connect(lambda v, k=key: self._on_prop_change(k, v, commit=False))
-        # Ensure exact typing triggers a permanent change
-        spin.editingFinished.connect(lambda s=spin, k=key: self._on_prop_change(k, s.value(), commit=True))
+        prop_widget.valueChanged.connect(lambda v, k=key: self._on_animatable_prop_change(k, v))
+        prop_widget.keyframe_btn.clicked.connect(lambda _=False, k=key: self._on_keyframe_clicked(k))
 
-        controls_layout.addWidget(slider)
-        controls_layout.addWidget(spin)
-        row.addWidget(controls)
-        layout.addLayout(row)
-
-        self._dynamic_widgets[key] = slider
+        layout.addWidget(prop_widget)
+        self._dynamic_widgets[key] = prop_widget
 
     def _build_float_spin(self, layout, key, label, control, values):
         min_val = control.get("min", 0.0)
@@ -411,7 +569,6 @@ class PropertiesPanel(QFrame):
 
         row.addWidget(spin)
         layout.addLayout(row)
-
         self._dynamic_widgets[key] = spin
 
     def _build_combo(self, layout, key, label, control, values):
@@ -438,7 +595,6 @@ class PropertiesPanel(QFrame):
 
         row.addWidget(combo)
         layout.addLayout(row)
-
         self._dynamic_widgets[key] = combo
 
     def _build_color(self, layout, key, label, control, values):
@@ -485,7 +641,6 @@ class PropertiesPanel(QFrame):
 
         row.addWidget(btn)
         layout.addLayout(row)
-
         self._dynamic_widgets[key] = btn
 
     def _build_font(self, layout, key, label, control, values):
@@ -504,7 +659,6 @@ class PropertiesPanel(QFrame):
 
         row.addWidget(picker)
         layout.addLayout(row)
-
         self._dynamic_widgets[key] = picker
 
     def _build_text(self, layout, key, label, control, values):
@@ -519,7 +673,6 @@ class PropertiesPanel(QFrame):
         text_input.editingFinished.connect(lambda ti=text_input, k=key: self._on_prop_change(k, ti.text(), commit=True))
 
         layout.addWidget(text_input)
-
         self._dynamic_widgets[key] = text_input
 
     def _build_checkbox(self, layout, key, label, control, values):
@@ -532,7 +685,6 @@ class PropertiesPanel(QFrame):
         chk.stateChanged.connect(lambda state, k=key: self._on_prop_change(k, state == Qt.Checked, commit=True))
 
         layout.addWidget(chk)
-
         self._dynamic_widgets[key] = chk
 
     def _build_xy(self, layout, key, label, control, values):
@@ -541,7 +693,6 @@ class PropertiesPanel(QFrame):
         default_x = control.get("default_x", 0)
         default_y = control.get("default_y", 0)
 
-        # XY uses Position_X and Position_Y keys internally
         current_x = values.get("Position_X", default_x)
         current_y = values.get("Position_Y", default_y)
 
@@ -557,7 +708,6 @@ class PropertiesPanel(QFrame):
         controls_layout.setContentsMargins(0, 0, 0, 0)
         controls_layout.setSpacing(4)
 
-        # Remove Label explicitly to fix Squishing
         lbl_x = QLabel("X:")
         lbl_x.setStyleSheet("color: #808080; font-size: 10px; font-weight: bold;")
         x_spin = QSpinBox()
@@ -600,8 +750,6 @@ class PropertiesPanel(QFrame):
         layout.addWidget(btn)
 
     def _build_effect_dropdown(self, layout, key, label, values):
-        """Builds a dropdown showing all applied effects on the clip,
-        allowing the user to select which effect's controls to view."""
         applied = values.get("applied_effects", [])
         if isinstance(applied, str):
             applied = [applied]
@@ -635,24 +783,48 @@ class PropertiesPanel(QFrame):
 
         row.addWidget(combo)
         layout.addLayout(row)
-
         self._dynamic_widgets["_effect_selector"] = combo
 
-    # ================================================================
-    # Property Change Handler
-    # ================================================================
+    def _build_mirror_toggles(self, layout):
+        if not self.current_clip_obj or not hasattr(self.current_clip_obj, 'is_mirrored_h'):
+            return
+
+        self._add_section_header(layout, "Transform Extensions")
+        
+        row = QHBoxLayout()
+        chk_h = QCheckBox("Mirror Horizontal")
+        chk_h.setChecked(bool(getattr(self.current_clip_obj, 'is_mirrored_h', False)))
+        chk_h.setStyleSheet(self.checkbox_style)
+        chk_h.stateChanged.connect(lambda state: self._on_prop_change('is_mirrored_h', state == Qt.Checked, commit=True))
+        row.addWidget(chk_h)
+        self._dynamic_widgets['is_mirrored_h'] = chk_h
+        
+        chk_v = QCheckBox("Mirror Vertical")
+        chk_v.setChecked(bool(getattr(self.current_clip_obj, 'is_mirrored_v', False)))
+        chk_v.setStyleSheet(self.checkbox_style)
+        chk_v.stateChanged.connect(lambda state: self._on_prop_change('is_mirrored_v', state == Qt.Checked, commit=True))
+        row.addWidget(chk_v)
+        self._dynamic_widgets['is_mirrored_v'] = chk_v
+        
+        layout.addLayout(row)
 
     def _on_prop_change(self, prop_name, new_val, commit=True):
         if self.current_item_id and not self._block_signals:
             self.property_changed.emit(self.current_item_id, prop_name, new_val, commit)
+            
+            if self.current_clip_obj:
+                setattr(self.current_clip_obj, prop_name, new_val)
+                if hasattr(global_signals, 'clip_updated'):
+                    global_signals.clip_updated.emit(self.current_clip_obj)
+                if hasattr(global_signals, 'force_refresh'):
+                    global_signals.force_refresh.emit()
 
     def _apply_transition_to_all(self):
         if self.current_item_id and self.current_item_props is not None:
             track = getattr(self, "current_track", None)
             if not track:
                 return
-            # Find the transition combo
-            trans_key = self.current_sub_type  # "transition_in" or "transition_out"
+            trans_key = self.current_sub_type
             combo = self._dynamic_widgets.get(trans_key)
             current_trans = combo.currentText() if combo else "Cross Dissolve"
             self.property_changed.emit(
@@ -662,18 +834,15 @@ class PropertiesPanel(QFrame):
                 True
             )
 
-    # ================================================================
-    # External Sync (Preview Player <-> Properties Panel)
-    # ================================================================
-
     def _on_external_transform(self, clip_id, prop_name, value):
-        """Called when the preview player drags a clip — update our widgets without emitting back."""
         if clip_id == self.current_item_id:
             self._block_signals = True
 
             widget = self._dynamic_widgets.get(prop_name)
             if widget:
-                if isinstance(widget, QSpinBox):
+                if isinstance(widget, AnimatableProperty):
+                    widget.set_value(value)
+                elif isinstance(widget, QSpinBox):
                     widget.setValue(int(value))
                 elif isinstance(widget, QDoubleSpinBox):
                     widget.setValue(float(value))

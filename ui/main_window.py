@@ -82,7 +82,7 @@ class CustomTitleBar(QFrame):
         self.btn_close.setObjectName("TitleBarCloseBtn")
         self.btn_close.setStyleSheet("""
             QPushButton { background-color: transparent; border: none; border-radius: 4px; }
-            QPushButton:hover { background-color: #e81123; }
+            QPushButton:hover { background-color: #ff3b30; }
         """)
 
         self.btn_min.clicked.connect(self.parent_window.showMinimized)

@@ -341,8 +341,8 @@ class CropDialog(QDialog):
             QPushButton:hover { background-color: rgba(255, 255, 255, 0.1); }
             QPushButton#Primary { background-color: #e66b2c; color: #fff; border: none; }
             QPushButton#Primary:hover { background-color: #d85a1e; }
-            QPushButton#Danger { background-color: transparent; color: #e81123; border: 1px solid rgba(232, 17, 35, 0.3); }
-            QPushButton#Danger:hover { background-color: rgba(232, 17, 35, 0.1); }
+            QPushButton#Danger { background-color: transparent; color: #ff3b30; border: 1px solid rgba(255, 59, 48, 0.3); }
+            QPushButton#Danger:hover { background-color: rgba(255, 59, 48, 0.1); }
         """)
 
         layout = QVBoxLayout(self)
@@ -361,7 +361,7 @@ class CropDialog(QDialog):
         
         btn_close = QPushButton(qta.icon('mdi6.close', color='#808080'), "")
         btn_close.setFixedSize(30, 30)
-        btn_close.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: #e81123; border-radius: 6px; }")
+        btn_close.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: #ff3b30; border-radius: 6px; }")
         btn_close.clicked.connect(self.reject)
         
         h_layout.addWidget(lbl_title)

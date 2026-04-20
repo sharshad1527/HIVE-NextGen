@@ -1,16 +1,22 @@
 # ui/timeline/timeline_canvas.py
+
 import random
 import copy
 import json
 import os
 import hashlib
 import uuid
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QWidget, QMenu
 from PySide6.QtCore import Qt, QRect, QPoint, Signal, QTimer, QThreadPool, QCoreApplication
-from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath, QCursor, QPixmap
+from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath, QCursor, QPixmap, QPolygon
 
 from core.signal_hub import global_signals
 from core.models import ProjectData, TrackData, ClipData
+try:
+    from core.models import Easing
+except ImportError:
+    Easing = None
+
 from core.project_manager import project_manager
 from core.app_config import app_config
 from core.media_manager import media_manager
@@ -33,19 +39,18 @@ class TracksCanvas(QWidget):
     tracks_changed = Signal()
     v1_duration_changed = Signal(float)
     playhead_changed = Signal(float)
-    state_changed = Signal() # Emits whenever an edit is made to trigger Auto-Save tracking
+    state_changed = Signal() 
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
         
-        self._initialized = False  # Guard: prevents sync_to_project before project is loaded
+        self._initialized = False  
         self.zoom_factor = 1.0
         self.max_logical_width = 0
         self.logical_playhead = 0.0 
         self.v_scroll_y = 0 
         
-        # Tool States
         self.active_tool = "pointer"
         self.magnet_enabled = True
         self.v1_gravity_enabled = True
@@ -61,12 +66,11 @@ class TracksCanvas(QWidget):
         self._drop_target_edge = None
         
         self.items = []
-        self.audio_waveforms = [random.randint(10, 40) for _ in range(300)] # Fallback
+        self.audio_waveforms = [random.randint(10, 40) for _ in range(300)] 
         
         self.pixmap_cache = {} 
         self.pending_thumbs = set()
         
-        # App Teardown Protection
         self.thread_pool = QThreadPool.globalInstance()
         self.thread_pool.setMaxThreadCount(min(4, self.thread_pool.maxThreadCount()))
         app = QCoreApplication.instance()
@@ -79,6 +83,11 @@ class TracksCanvas(QWidget):
         self._potential_item = None
         self._potential_edge = None
         self._drag_started = False
+        
+        self.dragging_kf = None
+        self.dragging_kf_prop = None
+        self.dragging_kf_item = None
+        self.dragging_kf_backend = None
         
         self.selected_ids = set()
         self.selected_item_type = ""
@@ -98,6 +107,7 @@ class TracksCanvas(QWidget):
         
         self.history = []
         self.history_idx = -1
+        self.copied_attributes = None
         
         self.auto_scroll_timer = QTimer(self)
         self.auto_scroll_timer.timeout.connect(self._do_auto_scroll)
@@ -107,9 +117,6 @@ class TracksCanvas(QWidget):
         self._cleanup_empty_tracks()
         self._apply_magnetic_v1()
         self.update_max_width()
-        # NOTE: Do NOT call save_state() here — it would call sync_to_project()
-        # and overwrite the loaded project's tracks with empty items before
-        # load_from_project has a chance to populate self.items.
 
         global_signals.waveform_ready.connect(self._on_waveform_ready)
         if hasattr(global_signals, 'clip_transform_changed'):
@@ -130,11 +137,18 @@ class TracksCanvas(QWidget):
                 return cache_dir
             except Exception:
                 pass
-        # Fallback
         return str(app_config.thumbnail_cache_path)
+
+    def _get_backend_clip(self, clip_id):
+        if not project_manager.current_project: return None
+        for track in project_manager.current_project.tracks:
+            for clip in track.clips:
+                if clip.clip_id == clip_id: return clip
+        return None
 
     def _on_waveform_ready(self, file_path, waveform):
         """Ingests processed audio arrays mapped by backend."""
+
         for item in self.items:
             if item.get("file_path") == file_path:
                 item["waveform"] = waveform
@@ -145,7 +159,6 @@ class TracksCanvas(QWidget):
         for item in self.items:
             if item["id"] == clip_id:
                 item[prop_name] = value
-                # DO NOT CALL save_state() here, since dragged timeline events will save state on release
                 break
 
     def _on_dynamic_thumb_loaded(self, cache_key, qimg):
@@ -164,16 +177,13 @@ class TracksCanvas(QWidget):
 
         file_hash = hashlib.md5(file_path.encode()).hexdigest()
         
-        # Quantize to 3 seconds (3000ms) for huge performance gains
         time_ms_quantized = round(time_ms / 3000.0) * 3000
         cache_key = f"{file_hash}_{target_height}_{time_ms_quantized}"
 
-        # 1. RAM Cache (Instant Delivery)
         if cache_key in self.pixmap_cache:
             px = self.pixmap_cache[cache_key]
             return px if not px.isNull() else None
 
-        # 2. Disk Cache (Fast Delivery - avoids re-decoding across reboots)
         disk_cache_path = os.path.join(self.get_project_cache_dir(), f"{cache_key}.jpg")
         if os.path.exists(disk_cache_path):
             px = self._get_pixmap(disk_cache_path, target_height)
@@ -181,15 +191,13 @@ class TracksCanvas(QWidget):
                 self.pixmap_cache[cache_key] = px
                 return px
 
-        # 3. Generation via OpenCV (Heavy - Pushed to Background Thread)
         if cache_key not in self.pending_thumbs:
-            if len(self.pending_thumbs) < 30:  # Limit queue depth to prevent extreme lag on fast scrubbing
+            if len(self.pending_thumbs) < 30: 
                 self.pending_thumbs.add(cache_key)
                 worker = FrameFetchWorker(file_path, time_ms_quantized, target_height, cache_key, disk_cache_path)
                 worker.signals.loaded.connect(self._on_dynamic_thumb_loaded)
                 self.thread_pool.start(worker)
 
-        # Immediate Fallback to the main generic thumbnail while loading to prevent blinking
         fallback_path = os.path.join(self.get_project_cache_dir(), f"{file_hash}.jpg")
         if not os.path.exists(fallback_path):
             fallback_path = os.path.join(str(app_config.thumbnail_cache_path), f"{file_hash}.jpg")
@@ -197,6 +205,7 @@ class TracksCanvas(QWidget):
 
     def _get_pixmap(self, path, height):
         """Loads generic image thumbnails cleanly."""
+
         if not path or not os.path.exists(path):
             return None
         cache_key = f"{path}_{height}"
@@ -210,6 +219,7 @@ class TracksCanvas(QWidget):
 
     def get_formatted_duration(self):
         """Calculates total sequence duration and returns an HH:MM:SS:FF string for Hub syncing."""
+
         duration_logical = self.get_v1_duration()
         total_seconds = int(duration_logical // 100)
         frames = int((duration_logical % 100) / 100 * 30)
@@ -222,6 +232,7 @@ class TracksCanvas(QWidget):
 
     def load_from_project(self, project: ProjectData):
         """Translates backend ProjectData into UI timeline clips."""
+
         self.items.clear()
         
         if project and project.tracks:
@@ -250,7 +261,7 @@ class TracksCanvas(QWidget):
                     if item["type"] in ["audio", "video"] and item["file_path"]:
                         media_manager.request_waveform(item["file_path"])
                     
-        self._initialized = True  # Now safe to sync_to_project
+        self._initialized = True 
         self._cleanup_empty_tracks()
         self._apply_magnetic_v1()
         self.update_max_width()
@@ -259,10 +270,11 @@ class TracksCanvas(QWidget):
 
     def sync_to_project(self):
         """Packs current visual timeline blocks back into the backend Brain."""
+
         if not project_manager.current_project:
             return
         if not self._initialized:
-            return  # Guard: skip syncing empty items before project is loaded
+            return 
             
         new_tracks = []
         track_map = {}
@@ -279,32 +291,40 @@ class TracksCanvas(QWidget):
             clips = []
             
             for item in track_map.get(t_id, []):
-                # Clean out UI-only objects (like inf floats/waveforms) that crash MsgPack saving
                 metadata = {}
                 skip_keys = {"id", "track", "type", "text", "file_path", "x", "w", "visual_y", "waveform"}
                 for k, v in item.items():
                     if k in skip_keys:
                         continue
-                    # Filter out float('inf') which crashes msgpack
                     if isinstance(v, float) and (v == float('inf') or v == float('-inf') or v != v):
                         continue
                     metadata[k] = v
                 
                 actual_file_path = item.get("file_path", item.get("text", ""))
                 
-                # For captions, preserve the text in applied_effects
                 if item.get("type") == "caption":
                     if "text" not in metadata:
                         metadata["text"] = item.get("text", "New Caption")
                 
-                clips.append(ClipData(
-                    clip_id=item["id"],
-                    clip_type=item["type"],
-                    file_path=actual_file_path, 
-                    start_time=int(item["x"] * 10), 
-                    end_time=int((item["x"] + item["w"]) * 10),
-                    applied_effects=metadata
-                ))
+                # FIX: Re-use the live ClipData object to prevent orphaned property panel links!
+                old_clip = self._get_backend_clip(item["id"])
+                if old_clip:
+                    old_clip.clip_type = item["type"]
+                    old_clip.file_path = actual_file_path
+                    old_clip.start_time = int(item["x"] * 10)
+                    old_clip.end_time = int((item["x"] + item["w"]) * 10)
+                    old_clip.applied_effects = metadata
+                    clips.append(old_clip)
+                else:
+                    clips.append(ClipData(
+                        clip_id=item["id"],
+                        clip_type=item["type"],
+                        file_path=actual_file_path, 
+                        start_time=int(item["x"] * 10), 
+                        end_time=int((item["x"] + item["w"]) * 10),
+                        applied_effects=metadata,
+                        animations={}
+                    ))
                 
             new_tracks.append(TrackData(
                 track_name=t_def["label"],
@@ -327,8 +347,6 @@ class TracksCanvas(QWidget):
             item_id = list(self.selected_ids)[0]
             item = next((i for i in self.items if i["id"] == item_id), None)
             if item:
-                # BUG 3 FIX: When user clicked a sub-element (transition/effect badge),
-                # emit the sub-type so the Properties Panel shows the correct page.
                 emit_type = self.selected_item_type
                 if emit_type not in ["transition_in", "transition_out", "clip_effect"]:
                     emit_type = item["type"]
@@ -355,7 +373,6 @@ class TracksCanvas(QWidget):
                 self.save_state()
             return
 
-        # --- TRANSITION DURATION BUG FIX ---
         if prop_name == "transition_in_duration_sec":
             frames = max(1, int(float(new_value) * 30))
             for item in self.items:
@@ -399,7 +416,6 @@ class TracksCanvas(QWidget):
         
         global_signals.clip_transform_changed.emit(item_id, prop_name, new_value)
 
-    # --- DRAG AND DROP ---
     def _get_track_group(self, track_id):
         if not track_id: return None
         for t in self.track_defs:
@@ -484,7 +500,6 @@ class TracksCanvas(QWidget):
                 ty, th = self.get_track_y(target_track)
                 w = 300
                 
-                # Check if we are near the edge to insert between tracks
                 if pos.y() < ty + 10:
                     self._drop_target_rect = QRect(0, ty - 2, 9999, 4)
                     self._drop_target_type = "track_insert"
@@ -502,7 +517,6 @@ class TracksCanvas(QWidget):
                 ty = 32 + sum(t["height"] for t in self.track_defs)
                 th = 48
                 w = 300
-                # If hovering below all tracks, we can create one at the very bottom
                 self._drop_target_rect = QRect(int(logical_x * z), ty, w, th)
                 self._drop_target_type = "track_new"
                 event.acceptProposedAction()
@@ -518,7 +532,6 @@ class TracksCanvas(QWidget):
                 ty, th = self.get_track_y(target_track)
                 w = 150 if drop_type == "caption" else 300
                 
-                # Interleaved track insertion logic
                 if pos.y() < ty + 10:
                     self._drop_target_rect = QRect(0, ty - 2, 9999, 4)
                     self._drop_target_type = "track_insert"
@@ -539,7 +552,6 @@ class TracksCanvas(QWidget):
                 self._drop_target_type = "track_new"
                 event.acceptProposedAction()
             else:
-                # If hovering over a different group (e.g Effect over Video), allow inserting between!
                 ty, th = self.get_track_y(target_track) if target_track else (0, 0)
                 if target_track:
                     if pos.y() < ty + (th / 2):
@@ -587,7 +599,6 @@ class TracksCanvas(QWidget):
                     trans_dur_frames = max(1, int(dur_sec * 30))
 
                     if getattr(self, "_drop_target_edge", "left") == "left":
-                        # SINGLE-TRANSITION ENFORCEMENT: always replace, never stack
                         item["transition_in"] = title
                         item["transition_in_duration"] = trans_dur_frames
                         item["transition_in_duration_sec"] = dur_sec
@@ -601,7 +612,6 @@ class TracksCanvas(QWidget):
             elif drop_type == "effect" and self._drop_target_type == "clip":
                 item = next((i for i in self.items if i["id"] == self._drop_target_item), None)
                 if item:
-                    # applied_effects is historically a string OR a list. Ensure it's a list.
                     current_effects = item.get("applied_effects", [])
                     if isinstance(current_effects, str):
                         current_effects = [current_effects]
@@ -614,7 +624,6 @@ class TracksCanvas(QWidget):
                     item["applied_effects"] = current_effects
                     item["primary_effect"] = title
                     
-                    # Ensure preset defaults (like effect_amount) are injected!
                     preset_props = data.get("preset_properties", {})
                     if preset_props:
                         from core.preset_loader import get_default_properties
@@ -628,7 +637,6 @@ class TracksCanvas(QWidget):
             elif drop_type in ["media", "caption", "effect"] and self._drop_target_type in ["track", "track_new", "track_insert"]:
                 expected_group = "video" if subtype in ["video", "image"] else ("audio" if subtype == "audio" else ("caption" if drop_type == "caption" else "effect"))
                 
-                # Define the shared batch target track outside so multiple items map to the SAME new track
                 target_track = getattr(self, '_batch_target_track', None)
                 if not target_track:
                     if self._drop_target_type == "track_insert":
@@ -653,9 +661,6 @@ class TracksCanvas(QWidget):
                 item_w = 1000
                 max_w = float('inf')
                 
-                # FREEZE BUG FIX: duration is now stored in the media_info dict by the
-                # background MediaLoaderThread (via media_manager.process_file) — we never
-                # call cv2.VideoCapture on the main thread here anymore.
                 if data.get("duration") and float(data["duration"]) > 0:
                     duration_sec = float(data["duration"])
                     item_w = int(duration_sec * 100)
@@ -667,9 +672,8 @@ class TracksCanvas(QWidget):
                     item_w = 1500
                 elif subtype == "image":
                     item_w = int(app_config.get_setting("default_image_duration", 5.0) * 100)
-                # If duration is still 0 for media (ffmpeg failed), use a safe 10s fallback
                 elif subtype in ["video", "audio"]:
-                    item_w = 1000  # 10 seconds fallback
+                    item_w = 1000 
     
                 new_item = {
                     "id": f"{drop_type}_{random.randint(10000, 99999)}",
@@ -687,14 +691,12 @@ class TracksCanvas(QWidget):
                     new_item["primary_effect"] = title
                     new_item["applied_effects"] = [title]
                 
-                # Merge preset properties from JSON-based presets (effects, captions, transitions)
                 preset_props = data.get("preset_properties", {})
                 if preset_props:
                     from core.preset_loader import get_default_properties
                     defaults = get_default_properties({"properties": preset_props})
                     for k, v in defaults.items():
                         new_item[k] = v
-                    # Store the preset name for reference
                     new_item["preset_name"] = title
                 
                 if target_track != "video_1" or not self.v1_gravity_enabled:
@@ -712,7 +714,6 @@ class TracksCanvas(QWidget):
                 if new_item["type"] in ["audio", "video"] and new_item["file_path"]:
                     media_manager.request_waveform(new_item["file_path"])
                     
-                # Increment base_x for the next item in the batch
                 base_x += item_w
 
         self._cleanup_empty_tracks()
@@ -726,8 +727,6 @@ class TracksCanvas(QWidget):
         self._batch_target_track = None
         self.update()
         event.acceptProposedAction()
-
-    # --- END DRAG AND DROP ---
 
     def set_v_scroll(self, val):
         self.v_scroll_y = val
@@ -748,6 +747,7 @@ class TracksCanvas(QWidget):
 
     def save_state(self):
         """Pushes current visual layout to undo history, and signals the UI that a change happened."""
+
         self.history = self.history[:self.history_idx + 1]
         state = {
             "items": copy.deepcopy(self.items),
@@ -757,14 +757,12 @@ class TracksCanvas(QWidget):
         self.history.append(state)
         self.history_idx += 1
         
-        # CRITICAL FIX: Force the UI to push its layout to the Engine's Backend Brain immediately!
-        # This guarantees the RenderEngine sees dropped images and the AudioEngine tracks dragged clips.
         self.sync_to_project()
-        
         self.state_changed.emit()
         
     def add_item_directly(self, data_raw):
         """Handles the + button clicking from Workspace to shoot items into correct tracks immediately."""
+
         batch = data_raw.pop("batch") if "batch" in data_raw else [data_raw]
         base_x = self.logical_playhead
         
@@ -792,8 +790,6 @@ class TracksCanvas(QWidget):
             item_w = 1000
             max_w = float('inf')
             
-            # FREEZE BUG FIX: read pre-computed duration from media_manager dict.
-            # cv2.VideoCapture is NO LONGER called on the main thread.
             if data.get("duration") and float(data["duration"]) > 0:
                 duration_sec = float(data["duration"])
                 item_w = int(duration_sec * 100)
@@ -806,7 +802,7 @@ class TracksCanvas(QWidget):
             elif subtype == "image":
                 item_w = int(app_config.get_setting("default_image_duration", 5.0) * 100)
             elif subtype in ["video", "audio"]:
-                item_w = 1000  # 10-second safe fallback if duration not available
+                item_w = 1000  
 
             new_item = {
                 "id": f"{drop_type}_{random.randint(10000, 99999)}",
@@ -837,7 +833,6 @@ class TracksCanvas(QWidget):
                 
             base_x += item_w
             
-        # Run cleanup outside the batch loop
         self._cleanup_empty_tracks()
         self._apply_magnetic_v1()
         self.update_max_width()
@@ -911,7 +906,7 @@ class TracksCanvas(QWidget):
                         cv2.imwrite(frame_path, frame)
                         
                         cut_x = self.logical_playhead
-                        insert_duration = 300 # 300 units = 3 seconds (10ms per unit)
+                        insert_duration = 300 
                         
                         for other in self.items:
                             if other["track"] == item["track"] and other["x"] >= cut_x and other["id"] != item["id"]:
@@ -1083,11 +1078,6 @@ class TracksCanvas(QWidget):
         self.playhead_changed.emit(self.logical_playhead)
         self.update()
 
-    def _would_v1_be_empty(self, excluding_ids=None):
-        """Check if V1 would become empty if the given clip IDs were removed/moved."""
-        excluding = excluding_ids or set()
-        return not any(i for i in self.items if i["track"] == "video_1" and i["id"] not in excluding)
-
     def delete_selected_item(self):
         if not self.selected_ids:
             return
@@ -1098,10 +1088,9 @@ class TracksCanvas(QWidget):
         for i in self.items:
             if i["id"] in self.selected_ids or i.get("parent_id") in self.selected_ids:
                 if not self.is_track_locked(i["track"]):
-                    # Intelligently pop sub-properties if the user had them selected
                     if self.selected_item_type == "transition_in":
                         i.pop("transition_in", None)
-                        i.pop("transition", None) # Fallback legacy key
+                        i.pop("transition", None) 
                         i.pop("transition_in_duration", None)
                         changed = True
                     elif self.selected_item_type == "transition_out":
@@ -1115,10 +1104,8 @@ class TracksCanvas(QWidget):
                         to_delete.add(i["id"])
 
         if to_delete:
-            # BUG 2 FIX: Never let V1 become empty — block deletion if it would empty V1
             v1_remaining = [i for i in self.items if i["track"] == "video_1" and i["id"] not in to_delete]
             if not v1_remaining:
-                # Check if ANY items are V1 items being deleted
                 v1_deleting = [i for i in self.items if i["track"] == "video_1" and i["id"] in to_delete]
                 if v1_deleting:
                     print("V1 Protection: Cannot delete — at least one clip must remain on V1.")
@@ -1243,7 +1230,6 @@ class TracksCanvas(QWidget):
 
         max_group_counts = {"video": 1, "audio": 1, "caption": 0, "effect": 0, "word": 0}
         
-        # Determine the maximum used numerical ID for each track group to assign new tracks properly
         all_zones = top_zone + audio_zone
         for old_id in all_zones:
             group = old_id.split("_")[0]
@@ -1257,7 +1243,6 @@ class TracksCanvas(QWidget):
         new_defs = []
         track_mapping = {}
 
-        # 1. Map ID assignments from bottom to top so that newly generated tracks get assigned V3, V4 incrementally
         for old_id in reversed(top_zone):
             group = old_id.split("_")[0]
             try:
@@ -1266,29 +1251,24 @@ class TracksCanvas(QWidget):
                 num = 0
 
             if num >= 10000:
-                # Brand new track!
                 max_group_counts[group] += 1
                 new_num = max_group_counts[group]
                 new_id = f"{group}_{new_num}"
                 track_mapping[old_id] = new_id
             else:
-                # Existing track! Keep its identifier permanently.
                 track_mapping[old_id] = old_id
 
-        # 2. Append actual visual defs in top-to-bottom UI display order
         for old_id in top_zone:
             new_id = track_mapping[old_id]
             group = new_id.split("_")[0]
             new_num = int(new_id.split("_")[1])
             new_defs.append(self._create_def(group, new_num, new_id))
             
-        # Mid Separator
         track_mapping["video_1"] = "video_1"
         new_defs.append(self._create_def("video", 1, "video_1"))
         track_mapping["audio_1"] = "audio_1"
         new_defs.append(self._create_def("audio", 1, "audio_1"))
         
-        # Audio Extra
         for old_id in audio_zone:
             group = "audio"
             try:
@@ -1297,7 +1277,6 @@ class TracksCanvas(QWidget):
                 num = 0
                 
             if num >= 10000:
-                # Brand new track!
                 max_group_counts["audio"] += 1
                 new_num = max_group_counts["audio"]
                 new_id = f"audio_{new_num}"
@@ -1309,7 +1288,6 @@ class TracksCanvas(QWidget):
                 
             new_defs.append(self._create_def("audio", new_num, new_id))
             
-        # Word Base
         track_mapping["word_1"] = "word_1"
         new_defs.append(self._create_def("word", 1, "word_1"))
 
@@ -1354,6 +1332,118 @@ class TracksCanvas(QWidget):
             current_y += t["height"]
         return None
 
+    def _get_item_and_kf_at(self, pos):
+        z = self.zoom_factor
+        physical_x = pos.x()
+        y = pos.y()
+        diamond_hit_radius = 8
+        
+        for item in reversed(self.items):
+            if self.is_track_hidden(item["track"]): continue
+            ty, th = self.get_track_y(item["track"])
+            if ty <= y <= ty + th:
+                ix = item["x"] * z
+                iw = item["w"] * z
+                
+                if ix <= physical_x <= ix + iw:
+                    backend_clip = self._get_backend_clip(item["id"])
+                    if backend_clip and hasattr(backend_clip, 'animations'):
+                        for prop, anim_track in backend_clip.animations.items():
+                            if not getattr(anim_track, 'enabled', True): continue
+                            for kf in getattr(anim_track, 'keyframes', []):
+                                kf_abs_time = item["x"] + kf.time
+                                kf_x = int(kf_abs_time * z)
+                                kf_y = item.get("visual_y", ty) + th / 2
+                                if abs(physical_x - kf_x) < diamond_hit_radius and abs(y - kf_y) < diamond_hit_radius:
+                                    return item, backend_clip, (prop, kf)
+                    
+                    return item, backend_clip, None
+        return None, None, None
+
+    def contextMenuEvent(self, event):
+        item, backend_clip, kf_tuple = self._get_item_and_kf_at(event.pos())
+        if not item: return
+        
+        if item["id"] not in self.selected_ids:
+            self.selected_ids = {item["id"]}
+            self.selected_item_type = item["type"]
+            self._emit_selection_state()
+            self.update()
+        
+        menu = QMenu(self)
+        
+        if kf_tuple:
+            prop_name, kf = kf_tuple
+            title = menu.addAction(f"{prop_name.replace('_', ' ').title()} Keyframe")
+            title.setEnabled(False)
+            menu.addSeparator()
+            
+            linear_act = menu.addAction("Linear Interpolation")
+            ease_in_act = menu.addAction("Ease In")
+            ease_out_act = menu.addAction("Ease Out")
+            menu.addSeparator()
+            del_kf_act = menu.addAction("Delete Keyframe")
+            
+            action = menu.exec(event.globalPos())
+            
+            if action in [linear_act, ease_in_act, ease_out_act]:
+                if Easing:
+                    if action == linear_act: kf.easing = Easing.LINEAR
+                    elif action == ease_in_act: kf.easing = Easing.EASE_IN
+                    elif action == ease_out_act: kf.easing = Easing.EASE_OUT
+                if hasattr(global_signals, 'clip_updated'): global_signals.clip_updated.emit(backend_clip)
+                if hasattr(global_signals, 'force_refresh'): global_signals.force_refresh.emit()
+                self.update()
+                
+            elif action == del_kf_act:
+                anim_track = backend_clip.animations[prop_name]
+                if hasattr(anim_track, 'remove_keyframe'):
+                    anim_track.remove_keyframe(kf.time)
+                else:
+                    anim_track.keyframes.remove(kf)
+                
+                if not anim_track.keyframes:
+                    anim_track.enabled = False
+                    
+                if hasattr(global_signals, 'clip_updated'): global_signals.clip_updated.emit(backend_clip)
+                if hasattr(global_signals, 'force_refresh'): global_signals.force_refresh.emit()
+                self.update()
+                
+        else:
+            cut_act = menu.addAction("Cut")
+            copy_act = menu.addAction("Copy")
+            paste_act = menu.addAction("Paste")
+            dup_act = menu.addAction("Duplicate")
+            menu.addSeparator()
+            split_act = menu.addAction("Split at Playhead")
+            menu.addSeparator()
+            
+            paste_attr_act = menu.addAction("Paste Attributes")
+            if not getattr(self, 'copied_attributes', None):
+                paste_attr_act.setEnabled(False)
+                
+            del_act = menu.addAction("Delete")
+            
+            action = menu.exec(event.globalPos())
+            
+            if action == copy_act:
+                if backend_clip:
+                    self.copied_attributes = copy.deepcopy(backend_clip)
+            elif action == paste_attr_act and getattr(self, 'copied_attributes', None):
+                if backend_clip and hasattr(backend_clip, 'copy_attributes_from'):
+                    backend_clip.copy_attributes_from(self.copied_attributes)
+                    for k, v in backend_clip.applied_effects.items():
+                        item[k] = v
+                self.save_state()
+                self._emit_selection_state()
+                if hasattr(global_signals, 'clip_updated'): global_signals.clip_updated.emit(backend_clip)
+                if hasattr(global_signals, 'force_refresh'): global_signals.force_refresh.emit()
+                self.update()
+            elif action == split_act:
+                self.split_at_playhead()
+            elif action == del_act:
+                self.delete_selected_item()
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             z = self.zoom_factor
@@ -1361,7 +1451,25 @@ class TracksCanvas(QWidget):
             logical_x = physical_x / z
             y = event.position().y()
             
-            # BUG 1 FIX: Support Ctrl+click multi-select alongside Shift+click
+            item, backend_clip, kf_tuple = self._get_item_and_kf_at(event.position().toPoint())
+            if kf_tuple:
+                self.dragging_kf_item = item
+                self.dragging_kf_backend = backend_clip
+                self.dragging_kf_prop, self.dragging_kf = kf_tuple
+                self._drag_started = True
+                self.setCursor(Qt.ClosedHandCursor)
+                
+                exact_kf_abs_time = item["x"] + self.dragging_kf.time
+                self.set_playhead(exact_kf_abs_time)
+                
+                # Auto-select the item when a keyframe is clicked
+                if item["id"] not in self.selected_ids:
+                    self.selected_ids = {item["id"]}
+                    self.selected_item_type = item["type"]
+                    self._emit_selection_state()
+                    self.update()
+                return
+            
             shift_held = bool(event.modifiers() & Qt.ShiftModifier)
             ctrl_held = bool(event.modifiers() & Qt.ControlModifier)
             multi_select = shift_held or ctrl_held
@@ -1409,7 +1517,6 @@ class TracksCanvas(QWidget):
                         
                         sub_item_clicked = None
                         
-                        # Priority selection - Because it renders on top, we intercept FX clicks first!
                         if item.get("applied_effects"):
                             fx_rect = QRect(rect.right() - 22, rect.top() + 4, 18, 16)
                             if fx_rect.contains(physical_x, y):
@@ -1651,6 +1758,19 @@ class TracksCanvas(QWidget):
         logical_x = max(0, logical_x)
         self.snap_line_x = None 
         
+        if getattr(self, "dragging_kf", None):
+            item = self.dragging_kf_item
+            new_rel_time = logical_x - item["x"]
+            new_rel_time = max(0, min(new_rel_time, item["w"]))
+            self.dragging_kf.time = new_rel_time
+            
+            if hasattr(global_signals, 'clip_updated'):
+                global_signals.clip_updated.emit(self.dragging_kf_backend)
+            if hasattr(global_signals, 'force_refresh'):
+                global_signals.force_refresh.emit()
+            self.update()
+            return
+        
         if self.dragging_item == "playhead":
             self.set_playhead(logical_x)
             return
@@ -1755,7 +1875,6 @@ class TracksCanvas(QWidget):
                         if item["x"] < other["x"] + other["w"] and item["x"] + item["w"] > other["x"]:
                             item["x"] = old_x
                             item["w"] = old_w
-                            # Reset source_in rollback since collision denied resize
                             if self.resize_edge == "left":
                                 item["source_in"] = max(0, item.get("source_in", 0) - diff)
                             break
@@ -1781,6 +1900,21 @@ class TracksCanvas(QWidget):
             self.auto_scroll_timer.stop()
             self.snap_line_x = None
             
+            if getattr(self, "dragging_kf", None):
+                if self.dragging_kf_backend and self.dragging_kf_prop:
+                    track = self.dragging_kf_backend.animations.get(self.dragging_kf_prop)
+                    if track:
+                        track.keyframes.sort(key=lambda x: x.time)
+                
+                self.dragging_kf = None
+                self.dragging_kf_prop = None
+                self.dragging_kf_item = None
+                self.dragging_kf_backend = None
+                self._drag_started = False
+                self.setCursor(Qt.ArrowCursor)
+                self.save_state()
+                return
+            
             changed_during_drag = False
             
             if self._drag_started and self.dragging_item:
@@ -1794,7 +1928,6 @@ class TracksCanvas(QWidget):
                             group = "video" if item["type"] in ["video", "image"] else item["type"]
                             group_tracks = [t for t in self.track_defs if t["group"] == group]
                             
-                            # Remember original track before reassignment for V1 protection
                             track_before_drag = self.original_track
                             
                             if group_tracks:
@@ -1817,7 +1950,6 @@ class TracksCanvas(QWidget):
                                     elif center_y > last_t_y + last_th and group == "audio":
                                         item["track"] = f"{group}_{max_num + 1}"
 
-                            # BUG 2 FIX: If clip was on V1 and is now moving away, check V1 protection
                             if track_before_drag == "video_1" and item["track"] != "video_1":
                                 v1_remaining = [i for i in self.items if i["track"] == "video_1" and i["id"] != item["id"]]
                                 if not v1_remaining:
@@ -1854,6 +1986,29 @@ class TracksCanvas(QWidget):
             self.update_max_width()
             self._emit_selection_state()
             self.update()
+
+    def draw_keyframes(self, painter: QPainter, item: dict, clip_rect: QRect, z: float):
+        backend_clip = self._get_backend_clip(item["id"])
+        if not backend_clip or not hasattr(backend_clip, 'animations'): return
+        
+        diamond_size = 7
+        painter.setBrush(QColor("#e66b2c"))
+        painter.setPen(QPen(QColor("white"), 1))
+        
+        for prop_name, anim_track in backend_clip.animations.items():
+            if not getattr(anim_track, 'enabled', True): continue
+            for kf in getattr(anim_track, 'keyframes', []):
+                kf_abs_time = item["x"] + kf.time
+                kf_x = int(kf_abs_time * z)
+                kf_y = clip_rect.center().y()
+                
+                poly = [
+                    QPoint(kf_x, kf_y - diamond_size),
+                    QPoint(kf_x + diamond_size, kf_y),
+                    QPoint(kf_x, kf_y + diamond_size),
+                    QPoint(kf_x - diamond_size, kf_y)
+                ]
+                painter.drawPolygon(QPolygon(poly))
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -1929,9 +2084,6 @@ class TracksCanvas(QWidget):
                     painter.setPen(QPen(border_color, 1))
                     painter.drawPath(c_path)
 
-        # -------------------------------------------------------------
-        # PASS 1: Base Graphics (Rectangles, Thumbnails, Waveforms)
-        # -------------------------------------------------------------
         for item in self.items:
             if self.is_track_hidden(item["track"]): continue
             
@@ -1993,12 +2145,14 @@ class TracksCanvas(QWidget):
                 painter.setPen(QColor("#ffffff"))
                 painter.setFont(QFont("Arial", 8, QFont.Bold))
                 painter.drawText(rect, Qt.AlignCenter, item["text"])
+                self.draw_keyframes(painter, item, rect, z)
                 
             elif item["type"] == "effect":
                 painter.fillPath(path, QColor(138, 43, 226, 80))
                 painter.setPen(QColor("#e0b0ff"))
                 painter.setFont(QFont("Arial", 8, QFont.Bold))
                 painter.drawText(rect, Qt.AlignCenter, item["text"])
+                self.draw_keyframes(painter, item, rect, z)
 
             elif item["type"] in ["video", "image"]:
                 bg_color = QColor("#1a1a1a") if item["type"]=="video" else QColor("#1f1a30")
@@ -2007,15 +2161,12 @@ class TracksCanvas(QWidget):
                 painter.fillPath(path, bg_color)
                 painter.drawPath(path)
                 
-                # Split rect for thumb and waveform to prevent overlay
                 has_wave = item["type"] == "video" and item.get("waveform")
                 thumb_h = int((th - 8) * 0.65) if has_wave else int(th - 8)
                 thumb_rect = QRect(rect.left(), rect.top(), rect.width(), thumb_h)
                 
-                # DYNAMIC THUMBNAIL RENDERING BLOCK
                 if thumb_h > 0:
                     if item["type"] == "image":
-                        # For static images, seamlessly tile the one thumbnail
                         thumb_path = item.get("file_path")
                         px = self._get_pixmap(thumb_path, thumb_h)
                         if px:
@@ -2035,11 +2186,10 @@ class TracksCanvas(QWidget):
                             painter.restore()
                             
                     elif item["type"] == "video":
-                        # For video, extract actual timestamps based on timeline length scaling
                         painter.save()
                         painter.setClipRect(thumb_rect)
                         
-                        thumb_w_physical = int(thumb_h * 1.777) # 16:9 approx fallback size
+                        thumb_w_physical = int(thumb_h * 1.777) 
                         if thumb_w_physical < 10: thumb_w_physical = 100
                         
                         item_phys_x = thumb_rect.left()
@@ -2050,7 +2200,6 @@ class TracksCanvas(QWidget):
                         
                         for i in range(start_i, end_i):
                             logical_offset = (i * thumb_w_physical) / z
-                            # FIX: 100 units = 1000ms. So 1 unit = 10ms offset.
                             time_ms = (source_in + logical_offset) * 10
                             
                             px = self._get_dynamic_thumbnail(item, time_ms, thumb_h)
@@ -2061,7 +2210,6 @@ class TracksCanvas(QWidget):
                         painter.fillRect(thumb_rect, overlay_color)
                         painter.restore()
                 
-                # DRAW WAVEFORM OVERLAY FOR VIDEO
                 if has_wave:
                     wave_data = item.get("waveform", [])
                     if wave_data:
@@ -2073,7 +2221,7 @@ class TracksCanvas(QWidget):
                         painter.setClipRect(wave_bg_rect)
                         painter.fillRect(wave_bg_rect, QColor(0, 0, 0, 150))
                         
-                        wave_color = QColor(230, 107, 44, 220) if is_selected else QColor(0, 150, 150, 180) # Orange selected, Aqua unselected
+                        wave_color = QColor(160, 160, 160, 220) if is_selected else QColor(0, 150, 150, 180) 
                         bar_width = 2 if z > 0.5 else 1
                         wave_pen = QPen(wave_color, bar_width)
                         wave_pen.setCapStyle(Qt.RoundCap)
@@ -2112,21 +2260,20 @@ class TracksCanvas(QWidget):
 
             elif item["type"] == "audio":
                 if is_selected:
-                    painter.fillPath(path, QColor(230, 107, 44, 25))
-                    painter.setPen(QPen(QColor("#e66b2c"), 1))
-                    wave_color = QColor("#e66b2c")
+                    painter.fillPath(path, QColor(80, 80, 80, 60))
+                    painter.setPen(QPen(QColor("#a0a0a0"), 1))
+                    wave_color = QColor("#a0a0a0")
                 elif is_hovered:
-                    painter.fillPath(path, QColor(255, 255, 255, 12))
-                    painter.setPen(QPen(QColor("#404040"), 1))
+                    painter.fillPath(path, QColor(255, 255, 255, 15))
+                    painter.setPen(QPen(QColor("#606060"), 1))
                     wave_color = QColor("#cccccc")
                 else:
-                    painter.fillPath(path, Qt.transparent)
-                    painter.setPen(QPen(QColor("#1f1f1f"), 1))
-                    wave_color = QColor("#666666")
+                    painter.fillPath(path, QColor(40, 40, 40, 80))
+                    painter.setPen(QPen(QColor("#2a2a2a"), 1))
+                    wave_color = QColor("#808080")
 
                 painter.drawPath(path)
                 
-                # DRAW TEXT top-left
                 painter.setPen(QColor("#d1d1d1"))
                 painter.setFont(QFont("Arial", 8, QFont.Bold))
                 painter.drawText(rect.adjusted(5, 5, -5, -5), Qt.AlignLeft | Qt.AlignTop, item["text"])
@@ -2150,7 +2297,7 @@ class TracksCanvas(QWidget):
                 start_i = int(start_logical / logical_step)
                 end_i = int(end_logical / logical_step) + 1
                 
-                samples_per_logical = 50.0 / 100.0 # Standard UI scalar
+                samples_per_logical = 50.0 / 100.0 
                 
                 source_in = item.get("source_in", 0)
                 
@@ -2161,7 +2308,6 @@ class TracksCanvas(QWidget):
                         
                         hx = int(logical_w_pos * z)
                         
-                        # Add source_in shift for accurate audio waveform sync if trimmed
                         sample_idx = int((source_in + logical_offset) * samples_per_logical)
                         
                         val = wave_data[sample_idx] if 0 <= sample_idx < len(wave_data) else 0
@@ -2172,7 +2318,6 @@ class TracksCanvas(QWidget):
                         safe_h = max(2, min(h, max_wave_h))
                         painter.drawLine(hx, int(base_y - safe_h/2), hx, int(base_y + safe_h/2))
                 else:
-                    # Fallback dummy wave while loading safely to prevent visual pops
                     volume_pct = float(item.get("Volume", 100)) / 100.0
                     for i in range(start_i, end_i):
                         logical_w_pos = item["x"] + (i * logical_step)
@@ -2182,77 +2327,58 @@ class TracksCanvas(QWidget):
                         safe_h = min(h, max_wave_h) 
                         painter.drawLine(hx, int(base_y - safe_h/2), hx, int(base_y + safe_h/2))
 
-        # -------------------------------------------------------------
-        # PASS 2: Overlay Elements (Transitions, Text, FX Badges)
-        # Guarantees FX Button and Names are readable on top of everything!
-        # -------------------------------------------------------------
-        for item in self.items:
-            if self.is_track_hidden(item["track"]): continue
-            if item["type"] not in ["video", "image"]: continue
-            
-            item_start = item["x"] * z
-            item_end = (item["x"] + item["w"]) * z
-            if item_end < visible_left - 50 or item_start > visible_right + 50:
-                continue
+            if item["type"] in ["video", "image"]:
+                if item.get("transition_in") or item.get("transition"):
+                    frames = item.get("transition_in_duration", 30)
+                    t_w_physical = int((frames / 30.0) * 100 * z)
+                    t_rect = QRect(rect.left() - int(t_w_physical/2), rect.top(), t_w_physical, rect.height())
+                    
+                    fill_color = QColor(66, 153, 225, 200) if is_selected and self.selected_item_type == "transition_in" else QColor(66, 153, 225, 150)
+                    painter.fillRect(t_rect, fill_color) 
+                    painter.setPen(QPen(QColor(66, 153, 225, 255), 2 if is_selected and self.selected_item_type == "transition_in" else 1))
+                    painter.drawRect(t_rect)
+                    painter.setPen(QColor("#ffffff"))
+                    painter.setFont(QFont("Arial", 8, QFont.Bold))
+                    painter.drawText(t_rect, Qt.AlignCenter, "T")
+                    
+                if item.get("transition_out"):
+                    frames = item.get("transition_out_duration", 30)
+                    t_w_physical = int((frames / 30.0) * 100 * z)
+                    t_rect = QRect(rect.right() - int(t_w_physical/2), rect.top(), t_w_physical, rect.height())
+                    
+                    fill_color = QColor(66, 153, 225, 200) if is_selected and self.selected_item_type == "transition_out" else QColor(66, 153, 225, 150)
+                    painter.fillRect(t_rect, fill_color) 
+                    painter.setPen(QPen(QColor(66, 153, 225, 255), 2 if is_selected and self.selected_item_type == "transition_out" else 1))
+                    painter.drawRect(t_rect)
+                    painter.setPen(QColor("#ffffff"))
+                    painter.setFont(QFont("Arial", 8, QFont.Bold))
+                    painter.drawText(t_rect, Qt.AlignCenter, "T")
 
-            ty, th = self.get_track_y(item["track"])
-            if th == 0: continue 
-            draw_y = item.get("visual_y", ty)
-            rect = QRect(int(item["x"] * z), int(draw_y) + 4, int(item["w"] * z), th - 8)
-            is_selected = item["id"] in self.selected_ids
-
-            if item.get("transition_in") or item.get("transition"):
-                frames = item.get("transition_in_duration", 30)
-                t_w_physical = int((frames / 30.0) * 100 * z)
-                t_rect = QRect(rect.left() - int(t_w_physical/2), rect.top(), t_w_physical, rect.height())
+                painter.setPen(QColor("#d1d1d1"))
+                prefix = ""
+                if item.get("freeze"): prefix += "[F] "
+                if item.get("reverse"): prefix += "[Rev] "
+                if item.get("mirror"): prefix += "[M] "
+                if item.get("rotate"): prefix += "[Rot] "
                 
-                fill_color = QColor(66, 153, 225, 200) if is_selected and self.selected_item_type == "transition_in" else QColor(66, 153, 225, 150)
-                painter.fillRect(t_rect, fill_color) 
-                painter.setPen(QPen(QColor(66, 153, 225, 255), 2 if is_selected and self.selected_item_type == "transition_in" else 1))
-                painter.drawRect(t_rect)
-                painter.setPen(QColor("#ffffff"))
+                crop_type = item.get("crop_preset", "Original")
+                if crop_type != "Original": prefix += f"[{crop_type}] "
+                elif item.get("crop"): prefix += "[C] "
+                
                 painter.setFont(QFont("Arial", 8, QFont.Bold))
-                painter.drawText(t_rect, Qt.AlignCenter, "T")
-                
-            if item.get("transition_out"):
-                frames = item.get("transition_out_duration", 30)
-                t_w_physical = int((frames / 30.0) * 100 * z)
-                t_rect = QRect(rect.right() - int(t_w_physical/2), rect.top(), t_w_physical, rect.height())
-                
-                fill_color = QColor(66, 153, 225, 200) if is_selected and self.selected_item_type == "transition_out" else QColor(66, 153, 225, 150)
-                painter.fillRect(t_rect, fill_color) 
-                painter.setPen(QPen(QColor(66, 153, 225, 255), 2 if is_selected and self.selected_item_type == "transition_out" else 1))
-                painter.drawRect(t_rect)
-                painter.setPen(QColor("#ffffff"))
-                painter.setFont(QFont("Arial", 8, QFont.Bold))
-                painter.drawText(t_rect, Qt.AlignCenter, "T")
+                painter.drawText(rect.adjusted(5, 5, -5, -5), Qt.AlignLeft | Qt.AlignTop, prefix + item["text"])
 
-            # Draw Readability Text
-            painter.setPen(QColor("#d1d1d1"))
-            prefix = ""
-            if item.get("freeze"): prefix += "[F] "
-            if item.get("reverse"): prefix += "[Rev] "
-            if item.get("mirror"): prefix += "[M] "
-            if item.get("rotate"): prefix += "[Rot] "
-            
-            # Show Crop preset tag dynamically!
-            crop_type = item.get("crop_preset", "Original")
-            if crop_type != "Original": prefix += f"[{crop_type}] "
-            elif item.get("crop"): prefix += "[C] "
-            
-            painter.setFont(QFont("Arial", 8, QFont.Bold))
-            painter.drawText(rect.adjusted(5, 5, -5, -5), Qt.AlignLeft | Qt.AlignTop, prefix + item["text"])
-
-            # Render the FX box LAST so it remains clickable on top of transitions
-            if item.get("applied_effects"):
-                fx_rect = QRect(rect.right() - 22, rect.top() + 4, 18, 16)
-                fill_color = QColor(155, 89, 182, 220) if is_selected and self.selected_item_type == "clip_effect" else QColor(155, 89, 182, 180)
-                painter.fillRect(fx_rect, fill_color) 
-                painter.setPen(QPen(QColor("#e0b0ff"), 1 if is_selected and self.selected_item_type == "clip_effect" else 0))
-                painter.drawRect(fx_rect)
-                painter.setPen(QColor("#ffffff"))
-                painter.setFont(QFont("Arial", 7, QFont.Bold))
-                painter.drawText(fx_rect, Qt.AlignCenter, "FX")
+                if item.get("applied_effects"):
+                    fx_rect = QRect(rect.right() - 22, rect.top() + 4, 18, 16)
+                    fill_color = QColor(155, 89, 182, 220) if is_selected and self.selected_item_type == "clip_effect" else QColor(155, 89, 182, 180)
+                    painter.fillRect(fx_rect, fill_color) 
+                    painter.setPen(QPen(QColor("#e0b0ff"), 1 if is_selected and self.selected_item_type == "clip_effect" else 0))
+                    painter.drawRect(fx_rect)
+                    painter.setPen(QColor("#ffffff"))
+                    painter.setFont(QFont("Arial", 7, QFont.Bold))
+                    painter.drawText(fx_rect, Qt.AlignCenter, "FX")
+                    
+            self.draw_keyframes(painter, item, rect, z)
 
         if self.marquee_start and self.marquee_current:
             rect = QRect(self.marquee_start, self.marquee_current).normalized()
@@ -2343,14 +2469,14 @@ class TracksCanvas(QWidget):
 
         if self.snap_line_x is not None:
             snap_px = int(self.snap_line_x * z)
-            painter.setPen(QPen(QColor("#4299e1"), 2, Qt.DashLine))
+            painter.setPen(QPen(QColor("#e66b2c"), 2, Qt.DashLine))
             painter.drawLine(snap_px, 0, snap_px, self.height())
 
         if self.active_tool == "blade" and self.blade_line_x is not None:
             blade_px = int(self.blade_line_x * z)
-            painter.setPen(QPen(QColor("#e81123"), 1, Qt.DashLine))
+            painter.setPen(QPen(QColor("#ff3b30"), 1, Qt.DashLine))
             painter.drawLine(blade_px, 0, blade_px, self.height())
-            painter.setBrush(QColor("#e81123"))
+            painter.setBrush(QColor("#ff3b30"))
             painter.setPen(Qt.NoPen)
             painter.drawPolygon([
                 QPoint(blade_px - 5, ruler_y),

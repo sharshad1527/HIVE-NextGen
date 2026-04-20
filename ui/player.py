@@ -1,5 +1,3 @@
-# ui/player.py
-
 import qtawesome as qta
 import os
 import time
@@ -26,6 +24,7 @@ class TimelinePreviewCanvas(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.current_frame = None
+        self.current_time = 0.0  # Synced to playhead in logical units
         self.setStyleSheet("background-color: #000000; border-radius: 8px;")
         self.setMouseTracking(True)
         
@@ -45,6 +44,10 @@ class TimelinePreviewCanvas(QWidget):
         self._canvas_offset_y = 0
         self._proj_w = 1920
         self._proj_h = 1080
+        
+    def set_time(self, time_logical):
+        """Sets the current time in logical units (100 = 1 sec)"""
+        self.current_time = time_logical
         
     def set_frame(self, qimage):
         self.current_frame = qimage
@@ -68,17 +71,14 @@ class TimelinePreviewCanvas(QWidget):
         if self._canvas_scale == 0:
             return QPointF(0, 0)
         
-        # Get the project resolution
         project = project_manager.current_project
         if project:
             self._proj_w, self._proj_h = project.resolution
         
-        # Canvas coords -> normalized frame coords -> project coords
         frame_x = (canvas_point.x() - self._canvas_offset_x) / self._canvas_scale
         frame_y = (canvas_point.y() - self._canvas_offset_y) / self._canvas_scale
         
-        # Frame coords are at render_scale, but project coords are at full resolution
-        render_engine_scale = 1.0  # The render engine's scale
+        render_engine_scale = 1.0 
         proj_x = frame_x / render_engine_scale
         proj_y = frame_y / render_engine_scale
         
@@ -106,21 +106,30 @@ class TimelinePreviewCanvas(QWidget):
             return None
         
         props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
-        pos_x = props.get("Position_X", 0)
-        pos_y = props.get("Position_Y", 0)
-        scale_pct = props.get("Scale", 100) / 100.0
         
+        base_x = getattr(clip, "Position_X", props.get("Position_X", 0))
+        base_y = getattr(clip, "Position_Y", props.get("Position_Y", 0))
+        base_zoom = props.get("Scale", 100) / 100.0
+        base_rot = props.get("Rotation", 0)
+        
+        if hasattr(clip, 'get_animated_value'):
+            rel_time = max(0.0, self.current_time - (clip.start_time / 10.0))
+            pos_x = clip.get_animated_value("Position_X", rel_time, base_x)
+            pos_y = clip.get_animated_value("Position_Y", rel_time, base_y)
+            zoom = clip.get_animated_value("Scale", rel_time, base_zoom * 100) / 100.0
+            rotation = clip.get_animated_value("Rotation", rel_time, base_rot)
+        else:
+            pos_x, pos_y, zoom, rotation = base_x, base_y, base_zoom, base_rot
+            
+        scale_pct = zoom
         self._update_canvas_mapping()
         
-        # The clip is rendered centered in the project canvas, offset by Position_X/Y
         center_x = (self._proj_w / 2) + pos_x
         center_y = (self._proj_h / 2) + pos_y
-        
         cw, ch = self._proj_w, self._proj_h
         
         if clip.clip_type in ["video", "image"] and getattr(clip, "file_path", None) and os.path.exists(clip.file_path):
             if "media_w" not in props or "media_h" not in props:
-                # Need to lookup dimensions and cache them
                 try:
                     import cv2
                     if clip.clip_type == "video":
@@ -158,14 +167,11 @@ class TimelinePreviewCanvas(QWidget):
         half_w = (cw / 2) * scale_pct
         half_h = (ch / 2) * scale_pct
         
-        # Convert to canvas widget coordinates
         render_scale = self._canvas_scale
         cx = self._canvas_offset_x + center_x * render_scale
         cy = self._canvas_offset_y + center_y * render_scale
         hw = half_w * render_scale
         hh = half_h * render_scale
-        
-        rotation = props.get("Rotation", 0)
         
         return {"cx": cx, "cy": cy, "hw": hw, "hh": hh, "rotation": rotation, "original_scale": scale_pct}
         
@@ -194,7 +200,6 @@ class TimelinePreviewCanvas(QWidget):
                 painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
                 painter.drawImage(QRect(x, y, nw, nh), self.current_frame)
         
-        # Draw selection handles
         if self._show_handles and self._selected_clip_id:
             clip = self._get_selected_clip_data()
             if clip and clip.clip_type in ("video", "image", "caption"):
@@ -208,12 +213,10 @@ class TimelinePreviewCanvas(QWidget):
                     painter.translate(cx, cy)
                     painter.rotate(rotation)
                     
-                    # Selection box
                     painter.setPen(QPen(QColor("#e66b2c"), 2, Qt.DashLine))
                     painter.setBrush(Qt.NoBrush)
                     painter.drawRect(QRectF(-hw, -hh, hw * 2, hh * 2))
                     
-                    # Corner handles
                     handle_size = 8
                     corners = [
                         QPointF(-hw, -hh), QPointF(hw, -hh),
@@ -227,13 +230,11 @@ class TimelinePreviewCanvas(QWidget):
                             handle_size, handle_size
                         ))
                     
-                    # Rotation handle (circle above the top center)
                     top_center = QPointF(0, -hh - 25)
                     painter.setPen(QPen(QColor("#ffffff"), 1))
                     painter.setBrush(QColor("#4299e1"))
                     painter.drawEllipse(top_center, 6, 6)
                     
-                    # Line from top center of bounds to rotation handle
                     painter.setPen(QPen(QColor("#4299e1"), 1))
                     painter.drawLine(0, int(-hh), 0, int(top_center.y() + 6))
                     
@@ -256,16 +257,26 @@ class TimelinePreviewCanvas(QWidget):
                     self._dragging = False
                     self._rotating = False
                     
-                    # Check rotation handle (circle above top center)
+                    base_x = getattr(clip, "Position_X", props.get("Position_X", 0))
+                    base_y = getattr(clip, "Position_Y", props.get("Position_Y", 0))
+                    base_rot = props.get("Rotation", 0)
+                    
+                    if hasattr(clip, 'get_animated_value'):
+                        rel_time = max(0.0, self.current_time - (clip.start_time / 10.0))
+                        curr_x = clip.get_animated_value("Position_X", rel_time, base_x)
+                        curr_y = clip.get_animated_value("Position_Y", rel_time, base_y)
+                        curr_rot = clip.get_animated_value("Rotation", rel_time, base_rot)
+                    else:
+                        curr_x, curr_y, curr_rot = base_x, base_y, base_rot
+                    
                     rot_handle = QPointF(0, -hh - 25)
                     if (local_pos - rot_handle).manhattanLength() < 20:
                         self._rotating = True
                         self._drag_start = pos
-                        self._drag_start_rotation = props.get("Rotation", 0)
+                        self._drag_start_rotation = curr_rot
                         self.setCursor(Qt.ClosedHandCursor)
                         return
                         
-                    # Check corner handles
                     handle_size = 12
                     corners = [
                         QPointF(-hw, -hh), QPointF(hw, -hh),
@@ -277,16 +288,14 @@ class TimelinePreviewCanvas(QWidget):
                             self._drag_start = pos
                             self._drag_start_scale = bounds["original_scale"]
                             
-                            # Original diagonal length from center mapping
                             self._drag_start_dist = math.sqrt((pos.x() - bounds["cx"])**2 + (pos.y() - bounds["cy"])**2)
                             return
                     
-                    # Check if click is inside bounds (drag to move)
                     rect = QRectF(-hw, -hh, hw * 2, hh * 2)
                     if rect.contains(local_pos):
                         self._dragging = True
                         self._drag_start = pos
-                        self._drag_start_pos = (props.get("Position_X", 0), props.get("Position_Y", 0))
+                        self._drag_start_pos = (curr_x, curr_y)
                         self.setCursor(Qt.ClosedHandCursor)
                         return
         
@@ -296,7 +305,6 @@ class TimelinePreviewCanvas(QWidget):
         if self._dragging and self._selected_clip_id:
             delta = event.position() - self._drag_start
             
-            # Convert pixel delta to project coordinates
             self._update_canvas_mapping()
             if self._canvas_scale > 0:
                 proj_dx = delta.x() / self._canvas_scale
@@ -305,17 +313,25 @@ class TimelinePreviewCanvas(QWidget):
                 new_x = int(self._drag_start_pos[0] + proj_dx)
                 new_y = int(self._drag_start_pos[1] + proj_dy)
                 
-                # Update the clip data directly
                 clip = self._get_selected_clip_data()
-                if clip and isinstance(clip.applied_effects, dict):
-                    clip.applied_effects["Position_X"] = new_x
-                    clip.applied_effects["Position_Y"] = new_y
+                if clip:
+                    rel_time = max(0.0, self.current_time - (clip.start_time / 10.0))
+                    if hasattr(clip, 'is_keyframing_enabled'):
+                        if clip.is_keyframing_enabled("Position_X"): clip.set_keyframe("Position_X", rel_time, new_x)
+                        if clip.is_keyframing_enabled("Position_Y"): clip.set_keyframe("Position_Y", rel_time, new_y)
                     
-                    # Emit signals for properties panel sync
+                    setattr(clip, "Position_X", new_x)
+                    setattr(clip, "Position_Y", new_y)
+                    
+                    if isinstance(clip.applied_effects, dict):
+                        clip.applied_effects["Position_X"] = new_x
+                        clip.applied_effects["Position_Y"] = new_y
+                    
                     self.transform_changed.emit(self._selected_clip_id, "Position_X", new_x)
                     self.transform_changed.emit(self._selected_clip_id, "Position_Y", new_y)
                     
-                    # Force re-render
+                    if hasattr(global_signals, 'force_refresh'):
+                        global_signals.force_refresh.emit()
                     self.update()
             return
         
@@ -324,23 +340,29 @@ class TimelinePreviewCanvas(QWidget):
             if clip:
                 bounds = self._get_clip_screen_bounds(clip)
                 if bounds:
-                    # Calculate angle from center to current mouse position
                     dx = event.position().x() - bounds["cx"]
                     dy = event.position().y() - bounds["cy"]
                     angle = math.degrees(math.atan2(dx, -dy))
                     
-                    # Calculate angle from center to start position
                     dx0 = self._drag_start.x() - bounds["cx"]
                     dy0 = self._drag_start.y() - bounds["cy"]
                     start_angle = math.degrees(math.atan2(dx0, -dy0))
                     
                     delta_angle = angle - start_angle
-                    new_rotation = int(max(-180, min(180, self._drag_start_rotation + delta_angle)))
+                    new_rotation = int(max(-360, min(360, self._drag_start_rotation + delta_angle)))
                     
+                    rel_time = max(0.0, self.current_time - (clip.start_time / 10.0))
+                    if hasattr(clip, 'is_keyframing_enabled') and clip.is_keyframing_enabled("Rotation"):
+                        clip.set_keyframe("Rotation", rel_time, new_rotation)
+                    
+                    setattr(clip, "Rotation", new_rotation)
                     if isinstance(clip.applied_effects, dict):
                         clip.applied_effects["Rotation"] = new_rotation
-                        self.transform_changed.emit(self._selected_clip_id, "Rotation", new_rotation)
-                        self.update()
+                        
+                    self.transform_changed.emit(self._selected_clip_id, "Rotation", new_rotation)
+                    if hasattr(global_signals, 'force_refresh'):
+                        global_signals.force_refresh.emit()
+                    self.update()
             return
 
         elif getattr(self, "_resizing", False) and self._selected_clip_id:
@@ -352,15 +374,22 @@ class TimelinePreviewCanvas(QWidget):
                     current_dist = math.sqrt((pos.x() - bounds["cx"])**2 + (pos.y() - bounds["cy"])**2)
                     
                     ratio = current_dist / self._drag_start_dist
-                    new_scale = max(10, min(400, int(self._drag_start_scale * ratio * 100)))
+                    new_scale = max(0.1, min(5.0, self._drag_start_scale * ratio))
                     
+                    rel_time = max(0.0, self.current_time - (clip.start_time / 10.0))
+                    if hasattr(clip, 'is_keyframing_enabled') and clip.is_keyframing_enabled("Scale"):
+                        clip.set_keyframe("Scale", rel_time, new_scale * 100)
+                        
+                    setattr(clip, "Scale", new_scale * 100)
                     if isinstance(clip.applied_effects, dict):
-                        clip.applied_effects["Scale"] = new_scale
-                        self.transform_changed.emit(self._selected_clip_id, "Scale", new_scale)
-                        self.update()
+                        clip.applied_effects["Scale"] = int(new_scale * 100)
+                        
+                    self.transform_changed.emit(self._selected_clip_id, "Scale", new_scale * 100)
+                    if hasattr(global_signals, 'force_refresh'):
+                        global_signals.force_refresh.emit()
+                    self.update()
             return
         
-        # Update cursor based on hover
         if self._show_handles and self._selected_clip_id:
             clip = self._get_selected_clip_data()
             if clip:
@@ -401,12 +430,12 @@ class TimelinePreviewCanvas(QWidget):
             self.setCursor(Qt.ArrowCursor)
             
             clip = self._get_selected_clip_data()
-            if clip and isinstance(clip.applied_effects, dict):
+            if clip:
                 global_signals.clip_transform_changed.emit(
-                    self._selected_clip_id, "Position_X", clip.applied_effects.get("Position_X", 0)
+                    self._selected_clip_id, "Position_X", getattr(clip, "Position_X", 0)
                 )
                 global_signals.clip_transform_changed.emit(
-                    self._selected_clip_id, "Scale", clip.applied_effects.get("Scale", 100)
+                    self._selected_clip_id, "Scale", getattr(clip, "Scale", 100.0)
                 )
             return
         
@@ -418,7 +447,6 @@ class PlayerPanel(QFrame):
     playhead_seek_requested = Signal(int)
     resolution_changed = Signal(str) 
 
-    # Aspect ratio presets: label -> (width, height) for shape calculation only
     ASPECT_PRESETS = {
         "16:9": (16, 9),
         "9:16": (9, 16),
@@ -441,7 +469,6 @@ class PlayerPanel(QFrame):
         self.preview_duration = 0
         self.preview_position = 0
         
-        # Current preview aspect ratio (w, h) — preview only, doesn't change project
         self._preview_aspect = (16, 9)
 
         self.audio_players = {}
@@ -465,7 +492,6 @@ class PlayerPanel(QFrame):
         self._main_layout = QVBoxLayout(self)
         self._main_layout.setContentsMargins(15, 15, 15, 15)
 
-        # Canvas area — a wrapper that centers the video_container with correct aspect
         self._canvas_area = QWidget()
         self._canvas_area.setStyleSheet("background: transparent;")
         self._canvas_area_layout = QVBoxLayout(self._canvas_area)
@@ -497,6 +523,9 @@ class PlayerPanel(QFrame):
         
         if hasattr(global_signals, 'clip_transform_changed'):
             global_signals.clip_transform_changed.connect(self._on_property_changed_rerender)
+            
+        if hasattr(global_signals, 'force_refresh'):
+            global_signals.force_refresh.connect(self._force_refresh_render)
         
         self.media_stack.addWidget(self.placeholder_lbl)
         self.media_stack.addWidget(self.video_widget)
@@ -540,7 +569,6 @@ class PlayerPanel(QFrame):
             }
         """
         
-        # Aspect Ratio selector (preview only)
         self.combo_aspect = QComboBox()
         self.combo_aspect.addItems(list(self.ASPECT_PRESETS.keys()))
         self.combo_aspect.setStyleSheet(combo_style)
@@ -548,7 +576,6 @@ class PlayerPanel(QFrame):
         self.combo_aspect.setToolTip("Player Preview Aspect Ratio")
         self.combo_aspect.currentTextChanged.connect(self._on_aspect_changed)
         
-        # Render resolution selector
         self.combo_res = QComboBox()
         self.combo_res.addItems(["Full", "1/2", "1/4", "1/8"])
         self.combo_res.setStyleSheet(combo_style)
@@ -598,11 +625,14 @@ class PlayerPanel(QFrame):
         
         global_signals.clip_selected.connect(self._on_clip_selected_for_preview)
         global_signals.clip_deselected.connect(self._on_clip_deselected_for_preview)
-        global_signals.clip_transform_changed.connect(self._on_property_changed_rerender)
         global_signals.project_resolution_changed.connect(self._on_project_resolution_changed)
         
         if QApplication.instance():
             QApplication.instance().aboutToQuit.connect(self._cleanup)
+
+    def _force_refresh_render(self):
+        if not self.is_playing:
+            self.render_engine.request_frame(int(self.playhead))
 
     def _on_clip_selected_for_preview(self, item_type, clip_id):
         self.timeline_canvas.set_selected_clip(clip_id)
@@ -614,24 +644,20 @@ class PlayerPanel(QFrame):
         global_signals.clip_transform_changed.emit(clip_id, prop_name, value)
 
     def _on_property_changed_rerender(self, clip_id, prop_name, value):
-        self.render_engine.request_frame(int(self.playhead))
+        self._force_refresh_render()
 
     def _on_timeline_frame_received(self, frame):
         self.timeline_canvas.set_frame(frame)
 
     def _on_aspect_changed(self, aspect_text):
-        """Preview-only aspect ratio change — reshapes canvas without modifying project."""
         if aspect_text in self.ASPECT_PRESETS:
             self._preview_aspect = self.ASPECT_PRESETS[aspect_text]
             self._update_canvas_size()
-            # Re-render current frame to fit new shape
-            self.render_engine.request_frame(int(self.playhead))
+            self._force_refresh_render()
 
     def _on_project_resolution_changed(self, resolution):
-        """Called when project settings change resolution — sync the aspect ratio combo."""
         w, h = resolution
-        # Find the best matching aspect preset
-        best_match = "16:9"  # default fallback
+        best_match = "16:9" 
         target_ratio = w / h if h > 0 else 1.78
         min_diff = float('inf')
         for label, (aw, ah) in self.ASPECT_PRESETS.items():
@@ -645,10 +671,9 @@ class PlayerPanel(QFrame):
         self.combo_aspect.blockSignals(False)
         self._preview_aspect = self.ASPECT_PRESETS[best_match]
         self._update_canvas_size()
-        self.render_engine.request_frame(int(self.playhead))
+        self._force_refresh_render()
 
     def _update_canvas_size(self):
-        """Resize video_container to fit the current aspect ratio within available space."""
         available_w = self._canvas_area.width()
         available_h = self._canvas_area.height()
         if available_w <= 0 or available_h <= 0:
@@ -657,13 +682,10 @@ class PlayerPanel(QFrame):
         aspect_w, aspect_h = self._preview_aspect
         aspect_ratio = aspect_w / aspect_h
         
-        # Calculate max size that fits within available space maintaining aspect ratio
         if available_w / available_h > aspect_ratio:
-            # Available space is wider than needed — height-limited
             canvas_h = available_h
             canvas_w = int(canvas_h * aspect_ratio)
         else:
-            # Available space is taller than needed — width-limited
             canvas_w = available_w
             canvas_h = int(canvas_w / aspect_ratio)
         
@@ -705,18 +727,16 @@ class PlayerPanel(QFrame):
 
         preset_type = media_data.get("type")
         
-        # Context-Aware Timeline Previewing for Presets
         if preset_type in ["effect", "caption", "transition"]:
             if not self.is_preview_mode or not hasattr(self, '_original_playhead'):
                 self._original_playhead = self.playhead
                 
             self.is_preview_mode = True
             self.is_timeline_preview = True
-            self.preview_duration = 5000  # 5 seconds loop limit
+            self.preview_duration = 5000 
             self.preview_position = 0
             self.preview_loops = 0
             
-            # Start preview from current timeline cursor position by default
             preview_start_ms = self._original_playhead * 10
             
             if preset_type == "transition" and hasattr(self, "timeline_canvas") and getattr(self, "timeline_canvas", None):
@@ -730,7 +750,6 @@ class PlayerPanel(QFrame):
                                     clip = c
                                     break
                 if clip:
-                    # Jump internal playhead to just before the transition
                     target_ms = max(clip.start_time, clip.end_time - 3000)
                     self.playhead = target_ms / 10.0
                     self.preview_duration = 4000
@@ -854,7 +873,6 @@ class PlayerPanel(QFrame):
             else:
                 self.btn_play.setIcon(qta.icon('mdi6.play', color='#e66b2c'))
 
-    # ================== AUDIO MIXING ENGINE ==================
     def _sync_timeline_audio(self, logical_pos):
         project = project_manager.current_project
         if not project: return
@@ -876,11 +894,19 @@ class PlayerPanel(QFrame):
                         trim_in_ms = max(trim_in_ms, fx_source_in)
                         local_ms = (current_ms - clip.start_time) + trim_in_ms
                         
-                        # --- Volume (% → linear) ---
-                        vol_pct = props.get("Volume", 100)
+                        # --- KEYFRAME AUDIO EVALUATION ---
+                        if hasattr(clip, 'get_animated_value'):
+                            rel_time = max(0.0, (current_ms - clip.start_time) / 10.0)
+                            vol_pct = clip.get_animated_value("Volume", rel_time, props.get("Volume", 100))
+                            pan = clip.get_animated_value("Pan", rel_time, props.get("Pan", 0)) / 100.0
+                            speed_pct = clip.get_animated_value("Speed", rel_time, props.get("Speed", 100))
+                        else:
+                            vol_pct = props.get("Volume", 100)
+                            pan = float(props.get("Pan", 0)) / 100.0
+                            speed_pct = float(props.get("Speed", 100))
+                        
                         linear_vol = max(0.0, float(vol_pct) / 100.0)
                         
-                        # --- Fade In / Fade Out ---
                         clip_duration_ms = clip.end_time - clip.start_time
                         elapsed_ms = current_ms - clip.start_time
                         fade_in_sec = float(props.get("Fade_In", 0))
@@ -899,17 +925,12 @@ class PlayerPanel(QFrame):
                         
                         effective_vol = linear_vol * fade_mult
                         
-                        # --- Pan (-100 left … +100 right) ---
-                        pan = float(props.get("Pan", 0)) / 100.0  # -1.0 … 1.0
                         left_vol = effective_vol * max(0.0, 1.0 - pan)
                         right_vol = effective_vol * max(0.0, 1.0 + pan)
-                        # Normalize so that center pan doesn't boost above 1.0
                         if pan != 0:
                             left_vol = min(1.0, left_vol)
                             right_vol = min(1.0, right_vol)
                         
-                        # --- Speed / Playback Rate ---
-                        speed_pct = float(props.get("Speed", 100))
                         playback_rate = max(0.1, min(4.0, speed_pct / 100.0))
                         
                         if clip.clip_id not in self.audio_players:
@@ -929,10 +950,8 @@ class PlayerPanel(QFrame):
                             player = self.audio_players[clip.clip_id]['player']
                             audio_output = self.audio_players[clip.clip_id]['output']
                             
-                            # Update volume/fade live
                             audio_output.setVolume(effective_vol)
                             
-                            # Update playback rate live
                             if abs(player.playbackRate() - playback_rate) > 0.01:
                                 player.setPlaybackRate(playback_rate)
                             
@@ -964,22 +983,20 @@ class PlayerPanel(QFrame):
     def _on_play_step(self):
         if not hasattr(self, 'playback_start_time'):
             self.playback_start_time = time.time()
-            self.playback_start_playhead = self.playhead
             
         elapsed = time.time() - self.playback_start_time
         new_pos = self.playback_start_playhead + (elapsed * 100.0)
         
+        self.timeline_canvas.set_time(self.playhead)
+        
         if self.is_timeline_preview:
-            # preview_duration is stored in ms
             duration_sec = getattr(self, 'preview_duration', 5000) / 1000.0
             if elapsed > duration_sec:
-                # Infinitely loop internally without emitting playhead seek
                 self.playback_start_time = time.time()
                 self.playhead = self.playback_start_playhead
             else:
                 self.playhead = new_pos
                 self._update_timecode_label(preview=False)
-                # DO NOT EMIT playhead_seek_requested to prevent timeline from moving
                 self.render_engine.request_frame(int(self.playhead))
                 self._sync_timeline_audio(int(self.playhead))
             return
@@ -993,6 +1010,9 @@ class PlayerPanel(QFrame):
         self.render_engine.request_frame(int(new_pos))
         self.playhead_seek_requested.emit(int(new_pos))
         self._sync_timeline_audio(int(new_pos))
+        
+        if hasattr(global_signals, 'playhead_moved'):
+            global_signals.playhead_moved.emit(self.playhead)
 
     def toggle_play(self):
         if self.is_preview_mode and not self.is_timeline_preview:
@@ -1024,6 +1044,9 @@ class PlayerPanel(QFrame):
                     self._sync_timeline_audio(int(self.playhead))
                 
             self.is_playing = not self.is_playing
+            
+            if hasattr(global_signals, 'playback_state_changed'):
+                global_signals.playback_state_changed.emit(self.is_playing)
 
     def step_forward(self):
         if self.is_preview_mode and not self.is_timeline_preview:
@@ -1068,15 +1091,18 @@ class PlayerPanel(QFrame):
                 delattr(self, '_original_playhead')
             
         self.playhead = playhead_logical
+        self.timeline_canvas.set_time(self.playhead)
         self._update_timecode_label()
         
-        if self.is_playing and not self.is_timeline_preview:
+        if hasattr(global_signals, 'playhead_moved'):
+            global_signals.playhead_moved.emit(self.playhead)
             if hasattr(self, 'playback_start_playhead'):
                 expected_pos = self.playback_start_playhead + ((time.time() - self.playback_start_time) * 100.0)
                 if abs(self.playhead - expected_pos) > 10: 
                     self.playback_start_time = time.time()
                     self.playback_start_playhead = self.playhead
         
+        # FIX: Always update the visual preview safely when scrolling or paused
         if not self.is_timeline_preview:
             self.render_engine.request_frame(self.playhead)
             

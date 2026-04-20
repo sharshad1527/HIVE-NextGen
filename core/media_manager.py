@@ -11,6 +11,12 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 from core.app_config import app_config
 
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+
 class WaveformGeneratorThread(QThread):
     """Background thread to extract audio peak envelopes cleanly using FFmpeg."""
     waveform_ready = Signal(str, list)
@@ -219,6 +225,44 @@ class MediaManager:
         self.proxy_queue = deque()
         self.active_proxy_threads = set()
         self.max_concurrent_proxies = 2 # Strictly enforces limit to protect OS resources
+        
+        self._captures = {}
+
+    def _get_capture(self, file_path):
+        if not CV2_AVAILABLE:
+            return None
+        if file_path not in self._captures:
+            self._captures[file_path] = cv2.VideoCapture(file_path)
+        return self._captures[file_path]
+
+    def get_frame(self, file_path, time_sec):
+        """Phase 3 Fix: Smart frame extraction allowing safe Reverse Playback."""
+        if not CV2_AVAILABLE or not os.path.exists(file_path):
+            return None
+            
+        cap = self._get_capture(file_path)
+        if not cap or not cap.isOpened():
+            return None
+            
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if fps <= 0: fps = 30.0
+        
+        target_frame = int(time_sec * fps)
+        current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+        
+        # The Bug Fix: OpenCV `cap.read()` sequential read is efficient going forward.
+        # But if we jump backward (Reverse Play, Scrubbing left) OR jump far ahead, 
+        # we MUST force the frame pointer to seek explicitly.
+        if target_frame < current_frame or target_frame > current_frame + 2:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+            
+        ret, frame = cap.read()
+        return frame if ret else None
+
+    def release_all(self):
+        for cap in self._captures.values():
+            cap.release()
+        self._captures.clear()
 
     def process_file(self, file_path):
         if not os.path.exists(file_path):

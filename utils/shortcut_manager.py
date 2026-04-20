@@ -6,6 +6,8 @@ from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel,
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtCore import Qt, Signal, QObject
 
+from core.signal_hub import global_signals
+
 # Default professional shortcuts
 DEFAULT_SHORTCUTS = {
     "Save Project": {"seq": "Ctrl+S", "signal": "sig_save_project"},
@@ -15,20 +17,25 @@ DEFAULT_SHORTCUTS = {
     "Toggle Snapping": {"seq": "S", "signal": "sig_toggle_snap"},
     "Toggle Gravity": {"seq": "G", "signal": "sig_toggle_gravity"},
     "Delete Item": {"seq": "Del", "signal": "sig_delete_item"},
+    "Copy Item": {"seq": "Ctrl+C", "signal": "sig_copy_item"},
+    "Paste Item": {"seq": "Ctrl+V", "signal": "sig_paste_item"},
+    "Cut Item": {"seq": "Ctrl+X", "signal": "sig_cut_item"},
+    "Duplicate Item": {"seq": "Ctrl+D", "signal": "sig_duplicate_item"},
     "Next Frame": {"seq": "Right", "signal": "sig_step_forward"},
     "Previous Frame": {"seq": "Left", "signal": "sig_step_backward"},
     "Zoom In": {"seq": "=", "signal": "sig_zoom_in"},
     "Zoom Out": {"seq": "-", "signal": "sig_zoom_out"},
     "Undo": {"seq": "Ctrl+Z", "signal": "sig_undo"},
     "Redo": {"seq": "Ctrl+Shift+Z", "signal": "sig_redo"},
-    "Split at Playhead": {"seq": "Ctrl+B", "signal": "sig_split_playhead"},
+    "Split at Playhead": {"seq": "Ctrl+K", "signal": "sig_split_playhead"},
     "Trim Left": {"seq": "Q", "signal": "sig_trim_left"},
     "Trim Right": {"seq": "W", "signal": "sig_trim_right"},
     "Freeze Frame": {"seq": "Shift+F", "signal": "sig_freeze_frame"},
     "Reverse": {"seq": "Ctrl+R", "signal": "sig_reverse"},
     "Mirror": {"seq": "Alt+M", "signal": "sig_mirror"},
     "Rotate": {"seq": "Alt+R", "signal": "sig_rotate"},
-    "Crop": {"seq": "Alt+C", "signal": "sig_crop"}
+    "Crop": {"seq": "Alt+C", "signal": "sig_crop"},
+    "Add Keyframe": {"seq": "Alt+K", "signal": "sig_add_keyframe"}
 }
 
 class ShortcutEditorDialog(QDialog):
@@ -126,6 +133,10 @@ class ShortcutManager(QObject):
     sig_toggle_snap = Signal()
     sig_toggle_gravity = Signal()
     sig_delete_item = Signal()
+    sig_copy_item = Signal()
+    sig_paste_item = Signal()
+    sig_cut_item = Signal()
+    sig_duplicate_item = Signal()
     sig_step_forward = Signal()
     sig_step_backward = Signal()
     sig_zoom_in = Signal()
@@ -140,6 +151,7 @@ class ShortcutManager(QObject):
     sig_mirror = Signal()
     sig_rotate = Signal()
     sig_crop = Signal()
+    sig_add_keyframe = Signal()
 
     def __init__(self, parent_window):
         super().__init__(parent_window)
@@ -148,6 +160,24 @@ class ShortcutManager(QObject):
         self._active_qshortcuts = []
         
         self.apply_shortcuts()
+        self._bind_to_global_signals()
+
+    def _bind_to_global_signals(self):
+        """Automatically wire up edit actions to the global signal hub"""
+        if hasattr(global_signals, 'clip_copy_requested'):
+            self.sig_copy_item.connect(global_signals.clip_copy_requested.emit)
+        if hasattr(global_signals, 'clip_paste_requested'):
+            self.sig_paste_item.connect(global_signals.clip_paste_requested.emit)
+        if hasattr(global_signals, 'clip_cut_requested'):
+            self.sig_cut_item.connect(global_signals.clip_cut_requested.emit)
+        if hasattr(global_signals, 'clip_duplicate_requested'):
+            self.sig_duplicate_item.connect(global_signals.clip_duplicate_requested.emit)
+        if hasattr(global_signals, 'clip_delete_requested'):
+            self.sig_delete_item.connect(global_signals.clip_delete_requested.emit)
+        if hasattr(global_signals, 'clip_split_requested'):
+            self.sig_split_playhead.connect(global_signals.clip_split_requested.emit)
+        if hasattr(global_signals, 'add_keyframe_requested'):
+            self.sig_add_keyframe.connect(global_signals.add_keyframe_requested.emit)
 
     def apply_shortcuts(self):
         for sc in self._active_qshortcuts:
@@ -165,6 +195,12 @@ class ShortcutManager(QObject):
                 signal_obj = getattr(self, sig_name)
                 shortcut.activated.connect(signal_obj.emit)
                 self._active_qshortcuts.append(shortcut)
+                
+        # Hardcode Backspace fallback for deletion
+        bs_shortcut = QShortcut(QKeySequence("Backspace"), self.parent_window)
+        bs_shortcut.setContext(Qt.ApplicationShortcut)
+        bs_shortcut.activated.connect(self.sig_delete_item.emit)
+        self._active_qshortcuts.append(bs_shortcut)
 
     def show_editor(self):
         dialog = ShortcutEditorDialog(self.shortcuts_config, self.parent_window)

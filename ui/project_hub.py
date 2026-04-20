@@ -110,7 +110,7 @@ class HubTitleBar(QFrame):
         
         self.btn_close = QPushButton(qta.icon('mdi6.close', color='#808080'), "")
         self.btn_close.setFixedSize(24, 24)
-        self.btn_close.setStyleSheet("QPushButton { background: transparent; border: none; border-radius: 4px; } QPushButton:hover { background-color: #e81123; }")
+        self.btn_close.setStyleSheet("QPushButton { background: transparent; border: none; border-radius: 4px; } QPushButton:hover { background-color: #ff3b30; }")
         self.btn_close.clicked.connect(self.parent_window.close)
         
         right_layout.addWidget(self.btn_close)
@@ -434,7 +434,7 @@ class ProjectHubWindow(QMainWindow):
         btn_delete = QPushButton(qta.icon('mdi6.trash-can-outline', color='#808080'), "")
         btn_delete.setFixedSize(18, 18)
         btn_delete.setCursor(Qt.PointingHandCursor)
-        btn_delete.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: rgba(232, 17, 35, 0.8); color: white; border-radius: 4px; }")
+        btn_delete.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: rgba(255, 59, 48, 0.8); color: white; border-radius: 4px; }")
         btn_delete.clicked.connect(lambda checked=False, p=file_path: self._handle_delete(p))
         
         title_row.addWidget(title_lbl)
@@ -463,7 +463,7 @@ class ProjectHubWindow(QMainWindow):
         card.setFixedSize(210, 160)
         card.setStyleSheet("""
             QFrame { background-color: rgba(26, 26, 26, 0.6); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; }
-            QFrame:hover { background-color: rgba(34, 34, 34, 0.8); border: 1px solid #e81123; }
+            QFrame:hover { background-color: rgba(34, 34, 34, 0.8); border: 1px solid #ff3b30; }
         """)
         
         layout = QVBoxLayout(card)
@@ -473,7 +473,7 @@ class ProjectHubWindow(QMainWindow):
         thumb = QLabel()
         thumb.setFixedHeight(90)
         thumb.setStyleSheet("background-color: #111111; border-top-left-radius: 11px; border-top-right-radius: 11px; border-bottom: 1px solid rgba(255,255,255,0.05);")
-        thumb.setPixmap(qta.icon('mdi6.delete-restore', color='#e81123').pixmap(32, 32))
+        thumb.setPixmap(qta.icon('mdi6.delete-restore', color='#ff3b30').pixmap(32, 32))
         thumb.setAlignment(Qt.AlignCenter)
         layout.addWidget(thumb)
         
@@ -487,7 +487,7 @@ class ProjectHubWindow(QMainWindow):
         
         bottom_row = QHBoxLayout()
         date_lbl = QLabel(f"Expires in {days_left} days")
-        date_lbl.setStyleSheet("color: #e81123; font-size: 10px; font-weight: bold;")
+        date_lbl.setStyleSheet("color: #ff3b30; font-size: 10px; font-weight: bold;")
         
         btn_recover = QPushButton(qta.icon('mdi6.restore', color='#4CAF50'), "")
         btn_recover.setFixedSize(22, 22)
@@ -496,11 +496,11 @@ class ProjectHubWindow(QMainWindow):
         btn_recover.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: rgba(76, 175, 80, 0.2); border-radius: 4px; }")
         btn_recover.clicked.connect(lambda _, p=file_path: self._handle_recover(p))
         
-        btn_delete = QPushButton(qta.icon('mdi6.delete-forever', color='#e81123'), "")
+        btn_delete = QPushButton(qta.icon('mdi6.delete-forever', color='#ff3b30'), "")
         btn_delete.setFixedSize(22, 22)
         btn_delete.setCursor(Qt.PointingHandCursor)
         btn_delete.setToolTip("Delete Permanently")
-        btn_delete.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: rgba(232, 17, 35, 0.2); border-radius: 4px; }")
+        btn_delete.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: rgba(255, 59, 48, 0.2); border-radius: 4px; }")
         btn_delete.clicked.connect(lambda _, p=file_path: self._handle_perm_delete(p))
         
         bottom_row.addWidget(date_lbl)

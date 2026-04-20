@@ -328,7 +328,7 @@ class ProjectSettingsDialog(QDialog):
         
         btn_close = QPushButton(qta.icon('mdi6.close', color='#808080'), "")
         btn_close.setFixedSize(24, 24)
-        btn_close.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: #e81123; }")
+        btn_close.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: #ff3b30; }")
         btn_close.clicked.connect(self.reject)
         
         title_layout.addWidget(lbl_title)

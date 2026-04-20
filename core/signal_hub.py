@@ -6,27 +6,34 @@ class SignalHub(QObject):
     The central nervous system of the NextGen UI.
     UI panels will listen to these signals instead of talking to each other directly.
     """
-    # Timeline Events
-    clip_selected = Signal(str, str)    # Emits item_type, clip_id
-    clip_deselected = Signal()          # Emits when background is clicked
+    project_loaded = Signal(object)
+    project_saved = Signal(str) # FIXED: Added project saved signal
+    project_resolution_changed = Signal(tuple) # FIXED: Added resolution swap signal
     
-    # Project Events
-    project_loaded = Signal(object)     # Emits the ProjectData object
-    project_saved = Signal(str)         # Emits the save path
+    playhead_moved = Signal(float)  # time in seconds
+    playback_state_changed = Signal(bool)  # is_playing
     
-    # Player Events
-    playback_state_changed = Signal(bool) # True for playing, False for paused
-    time_changed = Signal(int)          # Emits current time in milliseconds
+    # Clip Selection & Modification
+    clip_selected = Signal(str, str)  # FIXED: item_type, clip_id (fixes Player.py init crash)
+    clip_deselected = Signal()        # FIXED: Added deselected state
+    clip_updated = Signal(object)     # clip instance
+    clip_transform_changed = Signal(str, str, object) # FIXED: clip_id, prop_name, value
     
-    # Media Events
-    waveform_ready = Signal(str, list)  # Emits file_path, peaks_array
+    # Audio Background Processing
+    waveform_ready = Signal(str, list) # FIXED: file_path, waveform_data
     
-    # Transform Events (Preview Player -> Properties Panel sync)
-    clip_transform_changed = Signal(str, str, object)  # clip_id, property_name, new_value
+    # PHASE 1 & 3: Keyframe & Advanced Editing Signals
+    force_refresh = Signal() # Forces ui/player.py to instantly repaint current frame
+    keyframe_updated = Signal(object) # clip
+    add_keyframe_requested = Signal() # Alt+K functionality
     
-    # Player Aspect Ratio Events
-    project_resolution_changed = Signal(tuple)  # Emits (width, height) when project resolution changes
-
-# We create ONE global instance of this hub. 
-# Everywhere else in the app, you will just: `from core.signal_hub import global_signals`
+    # PHASE 2: Context Menus & Shortcuts
+    clip_split_requested = Signal() 
+    clip_cut_requested = Signal()
+    clip_copy_requested = Signal()
+    clip_paste_requested = Signal()
+    clip_duplicate_requested = Signal()
+    clip_delete_requested = Signal()
+    paste_attributes_requested = Signal()
+    
 global_signals = SignalHub()

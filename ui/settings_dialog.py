@@ -74,7 +74,7 @@ class SettingsDialog(QDialog):
         
         btn_close = QPushButton(qta.icon('mdi6.close', color='#808080'), "")
         btn_close.setFixedSize(24, 24)
-        btn_close.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: #e81123; border-radius: 4px; }")
+        btn_close.setStyleSheet("QPushButton { background: transparent; border: none; } QPushButton:hover { background-color: #ff3b30; border-radius: 4px; }")
         btn_close.clicked.connect(self.close)
         
         title_layout.addWidget(lbl_title)
@@ -341,10 +341,10 @@ class SettingsDialog(QDialog):
         btn_clear.setCursor(Qt.PointingHandCursor)
         btn_clear.setStyleSheet("""
             QPushButton {
-                background-color: rgba(232, 17, 35, 0.8); color: #ffffff; border: none;
+                background-color: rgba(255, 59, 48, 0.8); color: #ffffff; border: none;
                 border-radius: 6px; padding: 8px 16px; font-weight: bold;
             }
-            QPushButton:hover { background-color: #e81123; }
+            QPushButton:hover { background-color: #ff3b30; }
         """)
         btn_clear.clicked.connect(self.clear_cache)
 
