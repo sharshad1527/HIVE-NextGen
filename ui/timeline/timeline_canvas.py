@@ -6,7 +6,7 @@ import json
 import os
 import hashlib
 import uuid
-from PySide6.QtWidgets import QWidget, QMenu
+from PySide6.QtWidgets import QWidget, QMenu, QVBoxLayout, QGridLayout, QPushButton, QLabel, QFrame
 from PySide6.QtCore import Qt, QRect, QPoint, Signal, QTimer, QThreadPool, QCoreApplication
 from PySide6.QtGui import QPainter, QColor, QPen, QFont, QPainterPath, QCursor, QPixmap, QPolygon
 
@@ -28,6 +28,111 @@ try:
 except ImportError:
     CV2_AVAILABLE = False
 
+
+class KeyframePopup(QWidget):
+    def __init__(self, item, backend_clip, hit_kfs, canvas, parent=None):
+        super().__init__(parent, Qt.Popup | Qt.FramelessWindowHint)
+        self.item = item
+        self.backend_clip = backend_clip
+        self.hit_kfs = hit_kfs
+        self.canvas = canvas
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        
+        self.setStyleSheet("""
+            QWidget { background-color: #1a1a1a; border: 1px solid #333333; border-radius: 6px; }
+            QPushButton { background-color: transparent; border: none; color: white; padding: 5px; font-size: 11px; }
+            QPushButton:hover { background-color: #333333; border-radius: 4px; }
+            QLabel { color: #888888; font-size: 10px; font-weight: bold; border: none; }
+        """)
+        
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(4)
+        
+        title = ", ".join([prop.replace('_', ' ').title() for prop, kf in hit_kfs])
+        if len(hit_kfs) > 2: title = f"{len(hit_kfs)} Keyframes"
+        else: title += " Keyframe" + ("s" if len(hit_kfs) > 1 else "")
+            
+        lbl = QLabel(title)
+        layout.addWidget(lbl)
+        
+        # Presets grid
+        grid = QGridLayout()
+        grid.setSpacing(2)
+        
+        presets = [
+            ("Linear", Easing.LINEAR if Easing else 0, "mdi6.vector-line"),
+            ("Ease In", Easing.EASE_IN if Easing else 1, "mdi6.transition"),
+            ("Ease Out", Easing.EASE_OUT if Easing else 2, "mdi6.transition"),
+            ("Ease In-Out", Easing.EASE_IN_OUT if Easing else 3, "mdi6.transition"),
+            ("Bounce", Easing.BOUNCE if Easing else 4, "mdi6.chart-bell-curve-cumulative"),
+            ("Elastic", Easing.ELASTIC if Easing else 5, "mdi6.chart-bell-curve-cumulative"),
+            ("Cubic In", Easing.CUBIC_IN if Easing else 6, "mdi6.chart-bell-curve-cumulative"),
+            ("Cubic Out", Easing.CUBIC_OUT if Easing else 7, "mdi6.chart-bell-curve-cumulative")
+        ]
+        
+        row, col = 0, 0
+        for name, enum_val, icon_name in presets:
+            btn = QPushButton(name)
+            import qtawesome as qta
+            btn.setIcon(qta.icon(icon_name, color="white"))
+            btn.clicked.connect(lambda checked, e=enum_val: self.apply_easing(e))
+            grid.addWidget(btn, row, col)
+            col += 1
+            if col > 1:
+                col = 0
+                row += 1
+                
+        layout.addLayout(grid)
+        
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("background-color: #333333; border: none;")
+        sep.setFixedHeight(1)
+        layout.addWidget(sep)
+        
+        btn_graph = QPushButton("Open Graph Editor")
+        btn_graph.setIcon(qta.icon("mdi6.chart-timeline-variant", color="#e66b2c"))
+        btn_graph.setStyleSheet("color: #e66b2c;")
+        btn_graph.clicked.connect(self.open_graph)
+        layout.addWidget(btn_graph)
+        
+        btn_del = QPushButton("Delete Keyframe")
+        btn_del.setIcon(qta.icon("mdi6.delete-outline", color="#ff4444"))
+        btn_del.setStyleSheet("color: #ff4444;")
+        btn_del.clicked.connect(self.delete_keyframe)
+        layout.addWidget(btn_del)
+
+    def apply_easing(self, easing_val):
+        for prop_name, kf in self.hit_kfs:
+            kf.easing = easing_val
+        self._refresh()
+        self.close()
+        
+    def open_graph(self):
+        from .graph_editor import GraphEditorDialog
+        dialog = GraphEditorDialog(self.item, self.backend_clip, self.hit_kfs, self.canvas)
+        dialog.exec()
+        self.close()
+        
+    def delete_keyframe(self):
+        for prop_name, kf in self.hit_kfs:
+            anim_track = self.backend_clip.animations[prop_name]
+            if hasattr(anim_track, 'remove_keyframe'):
+                anim_track.remove_keyframe(kf.time)
+            else:
+                if kf in anim_track.keyframes:
+                    anim_track.keyframes.remove(kf)
+            
+            if not anim_track.keyframes:
+                anim_track.enabled = False
+        self._refresh()
+        self.close()
+
+    def _refresh(self):
+        if hasattr(global_signals, 'clip_updated'): global_signals.clip_updated.emit(self.backend_clip)
+        if hasattr(global_signals, 'force_refresh'): global_signals.force_refresh.emit()
+        self.canvas.update()
 
 class TracksCanvas(QWidget):
     """Custom painted widget that draws the actual timeline tracks, ruler, and playhead"""
@@ -1373,72 +1478,15 @@ class TracksCanvas(QWidget):
             self._emit_selection_state()
             self.update()
         
-        menu = QMenu(self)
-        
         if hit_kfs:
-            title_text = ", ".join([prop.replace('_', ' ').title() for prop, kf in hit_kfs])
-            if len(hit_kfs) > 2:
-                title_text = f"{len(hit_kfs)} Keyframes"
-            else:
-                title_text += " Keyframe" + ("s" if len(hit_kfs) > 1 else "")
-                
-            title = menu.addAction(title_text)
-            title.setEnabled(False)
-            menu.addSeparator()
-            
-            linear_act = menu.addAction("Linear Interpolation")
-            ease_in_act = menu.addAction("Ease In")
-            ease_out_act = menu.addAction("Ease Out")
-            ease_in_out_act = menu.addAction("Ease In-Out")
-            bounce_act = menu.addAction("Bounce")
-            elastic_act = menu.addAction("Elastic")
-            cubic_in_act = menu.addAction("Cubic In")
-            cubic_out_act = menu.addAction("Cubic Out")
-            
-            menu.addSeparator()
-            graph_act = menu.addAction("Open Graph Editor")
-            menu.addSeparator()
-            
-            del_kf_act = menu.addAction("Delete Keyframe" + ("s" if len(hit_kfs) > 1 else ""))
-            
-            action = menu.exec(event.globalPos())
-            
-            if action in [linear_act, ease_in_act, ease_out_act, ease_in_out_act, bounce_act, elastic_act, cubic_in_act, cubic_out_act]:
-                if Easing:
-                    for prop_name, kf in hit_kfs:
-                        if action == linear_act: kf.easing = Easing.LINEAR
-                        elif action == ease_in_act: kf.easing = Easing.EASE_IN
-                        elif action == ease_out_act: kf.easing = Easing.EASE_OUT
-                        elif action == ease_in_out_act: kf.easing = Easing.EASE_IN_OUT
-                        elif action == bounce_act: kf.easing = Easing.BOUNCE
-                        elif action == elastic_act: kf.easing = Easing.ELASTIC
-                        elif action == cubic_in_act: kf.easing = Easing.CUBIC_IN
-                        elif action == cubic_out_act: kf.easing = Easing.CUBIC_OUT
-                        
-                if hasattr(global_signals, 'clip_updated'): global_signals.clip_updated.emit(backend_clip)
-                if hasattr(global_signals, 'force_refresh'): global_signals.force_refresh.emit()
-                self.update()
-            elif action == graph_act:
-                from .graph_editor import GraphEditorDialog
-                dialog = GraphEditorDialog(item, backend_clip, hit_kfs, self)
-                dialog.exec()
-            elif action == del_kf_act:
-                for prop_name, kf in hit_kfs:
-                    anim_track = backend_clip.animations[prop_name]
-                    if hasattr(anim_track, 'remove_keyframe'):
-                        anim_track.remove_keyframe(kf.time)
-                    else:
-                        if kf in anim_track.keyframes:
-                            anim_track.keyframes.remove(kf)
-                    
-                    if not anim_track.keyframes:
-                        anim_track.enabled = False
-                    
-                if hasattr(global_signals, 'clip_updated'): global_signals.clip_updated.emit(backend_clip)
-                if hasattr(global_signals, 'force_refresh'): global_signals.force_refresh.emit()
-                self.update()
-                
+            self.kf_popup = KeyframePopup(item, backend_clip, hit_kfs, self, self)
+            global_pos = self.mapToGlobal(event.pos())
+            # Offset a bit above the cursor
+            self.kf_popup.move(global_pos.x() - 100, global_pos.y() - 150)
+            self.kf_popup.show()
         else:
+            menu = QMenu(self)
+            
             cut_act = menu.addAction("Cut")
             copy_act = menu.addAction("Copy")
             paste_act = menu.addAction("Paste")
@@ -2017,6 +2065,9 @@ class TracksCanvas(QWidget):
             self.update()
 
     def draw_keyframes(self, painter: QPainter, item: dict, clip_rect: QRect, z: float):
+        if item["id"] not in self.selected_ids:
+            return
+
         backend_clip = self._get_backend_clip(item["id"])
         if not backend_clip or not hasattr(backend_clip, 'animations'): return
         

@@ -14,7 +14,9 @@
         "max_lines": {"type": "slider", "min": 1, "max": 8, "default": 2},
         "word_wrap": {"type": "checkbox", "default": true},
         "text_align": {"type": "combo", "options": ["Left", "Center", "Right"], "default": "Center"},
-        "font_weight": {"type": "combo", "options": ["Regular", "Bold", "Light", "Black"], "default": "Bold"}
+        "font_weight": {"type": "combo", "options": ["Regular", "Bold", "Light", "Black"], "default": "Bold"},
+        "Position_X": {"type": "slider", "min": -9999, "max": 9999, "default": 0},
+        "Position_Y": {"type": "slider", "min": -9999, "max": 9999, "default": 300}
     },
     "controls_schema": [
         {
@@ -53,7 +55,8 @@
         {
             "section": "Transform",
             "controls": [
-                {"key": "position", "type": "xy", "min": -9999, "max": 9999, "default_x": 0, "default_y": 300, "label": "Position"},
+                {"key": "Position_X", "type": "slider", "min": -9999, "max": 9999, "default": 0, "label": "Position X"},
+                {"key": "Position_Y", "type": "slider", "min": -9999, "max": 9999, "default": 300, "label": "Position Y"},
                 {"key": "Scale", "type": "slider", "min": 10, "max": 400, "default": 100, "suffix": "%", "label": "Scale"},
                 {"key": "Rotation", "type": "slider", "min": -180, "max": 180, "default": 0, "suffix": "°", "label": "Rotation"},
                 {"key": "Opacity", "type": "slider", "min": 0, "max": 100, "default": 100, "suffix": "%", "label": "Opacity"}

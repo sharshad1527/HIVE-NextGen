@@ -242,63 +242,134 @@ class TimelinePreviewCanvas(QWidget):
         
         painter.end()
 
+    def _get_visible_clips(self):
+        visible = []
+        if not project_manager.current_project:
+            return visible
+        
+        # Iterate in reverse track order (top tracks drawn last, clicked first)
+        for track in reversed(project_manager.current_project.tracks):
+            if getattr(track, 'hidden', False):
+                continue
+            for clip in reversed(track.clips):
+                start = clip.start_time / 10.0
+                end = start + (clip.duration / 10.0)
+                if start <= self.current_time < end:
+                    visible.append(clip)
+        return visible
+
     def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and self._show_handles and self._selected_clip_id:
-            clip = self._get_selected_clip_data()
-            if clip:
-                bounds = self._get_clip_screen_bounds(clip)
-                if bounds:
-                    pos = event.position()
-                    local_pos = self._mouse_to_local(pos, bounds["cx"], bounds["cy"], bounds["rotation"])
-                    hw, hh = bounds["hw"], bounds["hh"]
-                    props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
-                    
-                    self._resizing = False
-                    self._dragging = False
-                    self._rotating = False
-                    
-                    base_x = getattr(clip, "Position_X", props.get("Position_X", 0))
-                    base_y = getattr(clip, "Position_Y", props.get("Position_Y", 0))
-                    base_rot = props.get("Rotation", 0)
-                    
-                    if hasattr(clip, 'get_animated_value'):
-                        rel_time = max(0.0, self.current_time - (clip.start_time / 10.0))
-                        curr_x = clip.get_animated_value("Position_X", rel_time, base_x)
-                        curr_y = clip.get_animated_value("Position_Y", rel_time, base_y)
-                        curr_rot = clip.get_animated_value("Rotation", rel_time, base_rot)
-                    else:
-                        curr_x, curr_y, curr_rot = base_x, base_y, base_rot
-                    
-                    rot_handle = QPointF(0, -hh - 25)
-                    if (local_pos - rot_handle).manhattanLength() < 20:
-                        self._rotating = True
-                        self._drag_start = pos
-                        self._drag_start_rotation = curr_rot
-                        self.setCursor(Qt.ClosedHandCursor)
-                        return
+        if event.button() == Qt.LeftButton:
+            pos = event.position()
+            handled = False
+            
+            # Check selected clip first
+            if self._show_handles and self._selected_clip_id:
+                clip = self._get_selected_clip_data()
+                if clip:
+                    bounds = self._get_clip_screen_bounds(clip)
+                    if bounds:
+                        local_pos = self._mouse_to_local(pos, bounds["cx"], bounds["cy"], bounds["rotation"])
+                        hw, hh = bounds["hw"], bounds["hh"]
+                        props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
                         
-                    handle_size = 12
-                    corners = [
-                        QPointF(-hw, -hh), QPointF(hw, -hh),
-                        QPointF(-hw, hh), QPointF(hw, hh)
-                    ]
-                    for corner in corners:
-                        if (local_pos - corner).manhattanLength() < handle_size * 2:
-                            self._resizing = True
+                        self._resizing = False
+                        self._dragging = False
+                        self._rotating = False
+                        
+                        base_x = getattr(clip, "Position_X", props.get("Position_X", 0))
+                        base_y = getattr(clip, "Position_Y", props.get("Position_Y", 0))
+                        base_rot = props.get("Rotation", 0)
+                        
+                        if hasattr(clip, 'get_animated_value'):
+                            rel_time = max(0.0, self.current_time - (clip.start_time / 10.0))
+                            curr_x = clip.get_animated_value("Position_X", rel_time, base_x)
+                            curr_y = clip.get_animated_value("Position_Y", rel_time, base_y)
+                            curr_rot = clip.get_animated_value("Rotation", rel_time, base_rot)
+                        else:
+                            curr_x, curr_y, curr_rot = base_x, base_y, base_rot
+                        
+                        rot_handle = QPointF(0, -hh - 25)
+                        if (local_pos - rot_handle).manhattanLength() < 20:
+                            self._rotating = True
                             self._drag_start = pos
-                            self._drag_start_scale = bounds["original_scale"]
+                            self._drag_start_rotation = curr_rot
+                            self.setCursor(Qt.ClosedHandCursor)
+                            handled = True
+                        else:
+                            handle_size = 12
+                            corners = [
+                                QPointF(-hw, -hh), QPointF(hw, -hh),
+                                QPointF(-hw, hh), QPointF(hw, hh)
+                            ]
+                            for corner in corners:
+                                if (local_pos - corner).manhattanLength() < handle_size * 2:
+                                    self._resizing = True
+                                    self._drag_start = pos
+                                    self._drag_start_scale = bounds["original_scale"]
+                                    self._drag_start_dist = math.sqrt((pos.x() - bounds["cx"])**2 + (pos.y() - bounds["cy"])**2)
+                                    handled = True
+                                    break
                             
-                            self._drag_start_dist = math.sqrt((pos.x() - bounds["cx"])**2 + (pos.y() - bounds["cy"])**2)
-                            return
+                            if not handled:
+                                rect = QRectF(-hw, -hh, hw * 2, hh * 2)
+                                if rect.contains(local_pos):
+                                    self._dragging = True
+                                    self._drag_start = pos
+                                    self._drag_start_pos = (curr_x, curr_y)
+                                    self.setCursor(Qt.ClosedHandCursor)
+                                    handled = True
+
+            # If not handled, try to select a different clip
+            if not handled:
+                clicked_clip = None
+                for clip in self._get_visible_clips():
+                    bounds = self._get_clip_screen_bounds(clip)
+                    if bounds:
+                        local_pos = self._mouse_to_local(pos, bounds["cx"], bounds["cy"], bounds["rotation"])
+                        hw, hh = bounds["hw"], bounds["hh"]
+                        rect = QRectF(-hw, -hh, hw * 2, hh * 2)
+                        if rect.contains(local_pos):
+                            clicked_clip = clip
+                            break
+                            
+                if clicked_clip:
+                    self._selected_clip_id = clicked_clip.clip_id
+                    self._show_handles = True
+                    self.update()
+                    if hasattr(global_signals, 'clip_selected'):
+                        global_signals.clip_selected.emit(clicked_clip.clip_type, clicked_clip.clip_id)
                     
-                    rect = QRectF(-hw, -hh, hw * 2, hh * 2)
-                    if rect.contains(local_pos):
+                    bounds = self._get_clip_screen_bounds(clicked_clip)
+                    if bounds:
+                        props = clicked_clip.applied_effects if isinstance(clicked_clip.applied_effects, dict) else {}
+                        base_x = getattr(clicked_clip, "Position_X", props.get("Position_X", 0))
+                        base_y = getattr(clicked_clip, "Position_Y", props.get("Position_Y", 0))
+                        
+                        if hasattr(clicked_clip, 'get_animated_value'):
+                            rel_time = max(0.0, self.current_time - (clicked_clip.start_time / 10.0))
+                            curr_x = clicked_clip.get_animated_value("Position_X", rel_time, base_x)
+                            curr_y = clicked_clip.get_animated_value("Position_Y", rel_time, base_y)
+                        else:
+                            curr_x, curr_y = base_x, base_y
+                            
                         self._dragging = True
                         self._drag_start = pos
                         self._drag_start_pos = (curr_x, curr_y)
                         self.setCursor(Qt.ClosedHandCursor)
-                        return
-        
+                    return
+                else:
+                    # Clicked empty space
+                    if self._selected_clip_id:
+                        self._selected_clip_id = ""
+                        self._show_handles = False
+                        self.update()
+                        if hasattr(global_signals, 'clip_deselected'):
+                            global_signals.clip_deselected.emit()
+
+            if handled:
+                return
+
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):

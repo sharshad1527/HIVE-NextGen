@@ -848,15 +848,17 @@ class WorkspacePanel(QFrame):
         self.all_media_cards.append(card)
 
     def _import_media_files(self):
+        default_dir = os.path.expanduser("~/Desktop")
         file_paths, _ = QFileDialog.getOpenFileNames(
-            self, "Import Media Files", "", 
+            self, "Import Media Files", default_dir, 
             "Media Files (*.mp4 *.mov *.avi *.mkv *.webm *.wav *.mp3 *.aac *.png *.jpg *.jpeg *.webp)"
         )
         if file_paths and project_manager.current_project:
             self._handle_media_import(file_paths)
 
     def _import_folder(self):
-        folder_path = QFileDialog.getExistingDirectory(self, "Import Media Folder")
+        default_dir = os.path.expanduser("~/Desktop")
+        folder_path = QFileDialog.getExistingDirectory(self, "Import Media Folder", default_dir)
         if folder_path and project_manager.current_project:
             folder_path = folder_path.replace('\\', '/')
             if folder_path not in project_manager.current_project.media_bin:

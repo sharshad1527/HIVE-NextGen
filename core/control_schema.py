@@ -69,7 +69,15 @@ def get_schema_for_clip(item_type: str, clip_data: dict) -> list:
     # 2. Fall back to defaults
     if not schema:
         schema = copy.deepcopy(DEFAULT_SCHEMAS.get(item_type, DEFAULT_SCHEMAS.get("empty", [])))
-    
+
+    # Ensure Transform section exists for visual items
+    if item_type in ("caption", "video", "image"):
+        has_transform = any(s.get("section") == "Transform" for s in schema)
+        if not has_transform:
+            transform_schema = next((s for s in DEFAULT_SCHEMAS.get(item_type, []) if s.get("section") == "Transform"), None)
+            if transform_schema:
+                schema.append(copy.deepcopy(transform_schema))
+
     # 3. Apply effect overrides (inject/hide controls)
     applied_effects = clip_data.get("applied_effects", [])
     if isinstance(applied_effects, str):

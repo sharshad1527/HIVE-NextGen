@@ -687,7 +687,7 @@ class PropertiesPanel(QFrame):
 
         update_style(btn, current)
 
-        def pick_color(b=btn, k=key):
+        def pick_color(_=False, b=btn, k=key):
             initial = QColor(b._current_color) if b._current_color != "transparent" else QColor("#FFFFFF")
             color = QColorDialog.getColor(initial, self, "Pick Color")
             if color.isValid():
@@ -878,7 +878,7 @@ class PropertiesPanel(QFrame):
                 if hasattr(global_signals, 'force_refresh'):
                     global_signals.force_refresh.emit()
 
-    def _apply_transition_to_all(self):
+    def _apply_transition_to_all(self, _=False):
         if self.current_item_id and self.current_item_props is not None:
             track = getattr(self, "current_track", None)
             if not track:
@@ -901,6 +901,11 @@ class PropertiesPanel(QFrame):
             if widget:
                 if isinstance(widget, AnimatableProperty):
                     widget.set_value(value)
+                    if hasattr(self.current_clip_obj, 'is_keyframing_enabled'):
+                        rel_time = self._get_relative_time()
+                        is_enabled = self.current_clip_obj.is_keyframing_enabled(prop_name)
+                        has_kf = self.current_clip_obj.get_keyframe_at_time(prop_name, rel_time) is not None
+                        widget.set_keyframe_state(is_enabled, has_kf)
                 elif isinstance(widget, QSpinBox):
                     widget.setValue(int(value))
                 elif isinstance(widget, QDoubleSpinBox):
