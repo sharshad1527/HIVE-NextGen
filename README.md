@@ -7,7 +7,7 @@
 **A Next-Generation, Automated Video Editing & Motion Graphics Suite.**  
 \<\!-- Badges \--\>  
 \<p\>  
-\<a href="https://www.google.com/search?q=https://github.com/yourusername/HIVE\_NextGen/blob/main/LICENSE"\>  
+\<a href="https://www.google.com/search?q=https://github.com/sharshad1527/HIVE\_NextGen/blob/main/LICENSE"\>  
 \<img src="https://www.google.com/search?q=https://img.shields.io/badge/License-GPLv3-blue.svg" alt="License: GPL v3"\>  
 \</a\>  
 \<a href="https://python.org"\>  
@@ -21,7 +21,7 @@
 \</a\>  
 \<img src="https://www.google.com/search?q=https://img.shields.io/badge/AI-Assisted-purple.svg" alt="AI Assisted"\>  
 \<a href="https://opensource.org/"\>  
-\<img src="https://www.google.com/search?q=https://img.shields.io/badge/Open%2520Source-%25E2%259D%25A4-red.svg" alt="Open Source"\>  
+\<img src="https://www.google.com/search?q=https://img.shields.io/badge/Open\_Source-%25E2%259D%25A4-red.svg" alt="Open Source"\>  
 \</a\>  
 \</p\>  
 \<p align="center"\>  
@@ -43,7 +43,8 @@ I built **HIVE NextGen** to fix this broken workflow. It is a streamlined, autom
 
 \<\!-- Replace the source below with your actual demo GIF path \--\>  
 \<div align="center"\>  
-\<img src="github/demo.gif" alt="HIVE NextGen Interface Demo" width="800" style="border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.2);"/\>  
+\<img src="github/demo.gif" alt="HIVE NextGen Interface Demo" width="800" style="border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.2);"/\>
+
 \<i\>A quick look at the HIVE NextGen timeline, workspace, and rendering engine in action.\</i\>  
 \</div\>
 
@@ -77,7 +78,7 @@ HIVE NextGen is an open-source project, and contributions from the community are
 4. Push to the Branch (git push origin feature/AmazingFeature)  
 5. Open a Pull Request
 
-Please read our [CONTRIBUTING.md](CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
+Please read our [CONTRIBUTING.md](https://www.google.com/search?q=CONTRIBUTING.md) for details on our code of conduct and the process for submitting pull requests.
 
 ## **📄 License**
 
