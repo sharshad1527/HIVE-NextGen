@@ -21,9 +21,9 @@ class AppController:
         
         self.app.setApplicationName("H.I.V.E NextGen")
         if os.name == "nt":
-            self.app.setWindowIcon(QIcon(get_asset_path("logos", "HIVE_App_Icon.png")))
+            self.app.setWindowIcon(QIcon(get_asset_path("logos", "HIVE_App_Icon.ico")))
         else:
-            self.app.setWindowIcon(QIcon(get_asset_path("logos", "HIVE_App_Icon.png")))
+            self.app.setWindowIcon(QIcon(get_asset_path("logos", "HIVE_App_Icon.svg")))
         
         self.app.setQuitOnLastWindowClosed(False)  # Fix: Prevent Qt from tearing down objects when Editor closes
         self.load_stylesheet()
