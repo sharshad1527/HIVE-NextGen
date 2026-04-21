@@ -1,0 +1,27 @@
+<?xml version="1.0" standalone="no"?>
+<svg id="svg-transparent-mark" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+                    <defs>
+                        <linearGradient id="pillarGrad2" x1="0%" y1="0%" x2="0%" y2="100%">
+                            <stop offset="0%" stop-color="#FF8A00"/>
+                            <stop offset="100%" stop-color="#E52E00"/>
+                        </linearGradient>
+                        <linearGradient id="playGrad2" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%" stop-color="#2D2D2D"/>
+                            <stop offset="100%" stop-color="#0A0A0A"/>
+                        </linearGradient>
+                        <filter id="shadow2" x="-20%" y="-20%" width="140%" height="140%">
+                            <feDropShadow dx="8" dy="12" stdDeviation="12" flood-color="#000000" flood-opacity="0.6"/>
+                        </filter>
+                        <filter id="glow2" x="-30%" y="-30%" width="160%" height="160%">
+                            <feGaussianBlur stdDeviation="16" result="blur"/>
+                            <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+                        </filter>
+                    </defs>
+
+                    <!-- Main Logo Mark Only (Italic/Skewed) -->
+                    <g transform="translate(256, 256) scale(1.05) skewX(-15) translate(-256, -256)">
+                        <rect x="308" y="126" width="64" height="260" rx="32" fill="url(#pillarGrad2)"/>
+                        <path d="M 190 206 L 330 256 L 190 306 Z" fill="url(#playGrad2)" filter="url(#glow2)" stroke="url(#pillarGrad2)" stroke-width="24" stroke-linejoin="round"/>
+                        <rect x="140" y="126" width="64" height="260" rx="32" fill="url(#pillarGrad2)" filter="url(#shadow2)"/>
+                    </g>
+                </svg>

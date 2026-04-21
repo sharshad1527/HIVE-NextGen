@@ -1,19 +1,33 @@
 # main.py
 import sys
 import os
+import ctypes
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+from PySide6.QtGui import QIcon
 from ui.main_window import MainWindow
 from ui.project_hub import ProjectHubWindow
 from core.project_manager import project_manager
 from datetime import datetime
 from core.app_config import app_config
+from utils.paths import get_asset_path
 
 class AppController:
     def __init__(self):
+        if os.name == "nt":
+            myappid="harshad.hivenextgen"
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+
         self.app = QApplication(sys.argv)
+        
+        self.app.setApplicationName("H.I.V.E NextGen")
+        if os.name == "nt":
+            self.app.setWindowIcon(QIcon(get_asset_path("logos", "HIVE_App_Icon.png")))
+        else:
+            self.app.setWindowIcon(QIcon(get_asset_path("logos", "HIVE_App_Icon.png")))
+        
         self.app.setQuitOnLastWindowClosed(False)  # Fix: Prevent Qt from tearing down objects when Editor closes
         self.load_stylesheet()
-        
+
         # Initialize windows (Editor is None until needed)
         self.hub = ProjectHubWindow()
         self.editor = None

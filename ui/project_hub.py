@@ -11,10 +11,13 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
 from PySide6.QtCore import Qt, QPoint, Signal, QSize
 from PySide6.QtGui import QPainter, QColor, QRadialGradient, QImage, QPixmap
 from PySide6.QtWidgets import QInputDialog, QMessageBox
+from PySide6.QtGui import QPixmap
 
 from core.project_manager import project_manager
 from core.app_config import app_config 
 from ui.settings_dialog import SettingsDialog
+from utils.paths import get_asset_path
+from ui.about_dialog import AboutDialog, ClickableLabel
 
 class HubSidebar(QWidget):
     def __init__(self, parent=None):
@@ -28,15 +31,29 @@ class HubSidebar(QWidget):
             QFrame { background-color: rgba(14, 14, 16, 0.90); border: 1px solid rgba(255, 255, 255, 0.05); border-radius: 12px; }
         """)
         sidebar_layout = QVBoxLayout(self.sidebar_box)
-        sidebar_layout.setContentsMargins(0, 0, 0, 15) 
+        sidebar_layout.setContentsMargins(0, 7, 0, 15) 
         sidebar_layout.setSpacing(10)
         sidebar_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
 
-        self.lbl_logo = QLabel("H.")
+        # self.lbl_logo = QLabel("H.")
+        # self.lbl_logo.setFixedSize(85, 44) 
+        # self.lbl_logo.setAlignment(Qt.AlignCenter)
+        # self.lbl_logo.setStyleSheet("color: #e66b2c; font-size: 20px; font-weight: 900; font-style: italic; background: transparent; border: none;")
+        # sidebar_layout.addWidget(self.lbl_logo, 0, Qt.AlignHCenter)
+
+        # Logo
+        self.lbl_logo = ClickableLabel()
         self.lbl_logo.setFixedSize(85, 44) 
         self.lbl_logo.setAlignment(Qt.AlignCenter)
-        self.lbl_logo.setStyleSheet("color: #e66b2c; font-size: 20px; font-weight: 900; font-style: italic; background: transparent; border: none;")
+        self.lbl_logo.setStyleSheet("background-color: transparent; border: none;")
+        logo_path = get_asset_path("logos", "HIVE_Logo_Mark.svg")
+        pixmap = QPixmap(logo_path)
+        scaled_pixmap = pixmap.scaled(44, 44, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.lbl_logo.setPixmap(scaled_pixmap)
         sidebar_layout.addWidget(self.lbl_logo, 0, Qt.AlignHCenter)
+        sidebar_layout.addSpacing(10)
+        self.lbl_logo.clicked.connect(self.show_about_dialog)
+
 
         self.btn_group = QButtonGroup(self)
         self.btn_group.setExclusive(True)
@@ -87,6 +104,11 @@ class HubSidebar(QWidget):
                 subprocess.Popen(["xdg-open", bin_dir])
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not open trash bin: {e}")
+
+    def show_about_dialog(self):
+        """Create and show the pop-up"""
+        dialog = AboutDialog(self)
+        dialog.exec()
 
 class HubTitleBar(QFrame):
     def __init__(self, parent=None):

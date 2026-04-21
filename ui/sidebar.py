@@ -3,7 +3,10 @@ import qtawesome as qta
 from PySide6.QtWidgets import (QWidget, QFrame, QVBoxLayout, QToolButton, 
                                QLabel, QSpacerItem, QSizePolicy, QButtonGroup,
                                QApplication)
+from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt, QSize, QEvent
+from utils.paths import get_asset_path
+from ui.about_dialog import AboutDialog, ClickableLabel
 
 class Sidebar(QWidget):
     def __init__(self, parent=None):
@@ -27,17 +30,31 @@ class Sidebar(QWidget):
         """)
         
         sidebar_layout = QVBoxLayout(self.sidebar_box)
-        sidebar_layout.setContentsMargins(0, 0, 0, 15) 
+        sidebar_layout.setContentsMargins(0, 7, 0, 15) 
         sidebar_layout.setSpacing(10)
         sidebar_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
 
+        # OLD Logo
+        # self.lbl_logo = QLabel("H.")
+        # self.lbl_logo.setFixedSize(85, 44) 
+        # self.lbl_logo.setAlignment(Qt.AlignCenter)
+        # self.lbl_logo.setStyleSheet("color: #e66b2c; font-size: 20px; font-weight: 900; font-style: italic; background: transparent; border: none;")
+        # sidebar_layout.addWidget(self.lbl_logo, 0, Qt.AlignHCenter)
+
         # Logo
-        self.lbl_logo = QLabel("H.")
+        self.lbl_logo = ClickableLabel()
         self.lbl_logo.setFixedSize(85, 44) 
         self.lbl_logo.setAlignment(Qt.AlignCenter)
-        self.lbl_logo.setStyleSheet("color: #e66b2c; font-size: 20px; font-weight: 900; font-style: italic; background: transparent; border: none;")
+        self.lbl_logo.setStyleSheet("background-color: transparent; border: none;")
+        logo_path = get_asset_path("logos", "HIVE_Logo_Mark.svg")
+        pixmap = QPixmap(logo_path)
+        scaled_pixmap = pixmap.scaled(44, 44, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.lbl_logo.setPixmap(scaled_pixmap)
         sidebar_layout.addWidget(self.lbl_logo, 0, Qt.AlignHCenter)
+        self.lbl_logo.clicked.connect(self.show_about_dialog)
 
+
+        
         # Button Group for exclusive selection
         self.btn_group = QButtonGroup(self)
         self.btn_group.setExclusive(True) 
@@ -120,3 +137,8 @@ class Sidebar(QWidget):
                     # For a strict radio-group, we usually don't deselect when clicking away
                     pass
         return super().eventFilter(obj, event)
+    
+    def show_about_dialog(self):
+        """Create and show the pop-up"""
+        dialog = AboutDialog(self)
+        dialog.exec()
