@@ -440,6 +440,8 @@ class TracksCanvas(QWidget):
             ))
             
         project_manager.current_project.tracks = new_tracks
+        if hasattr(global_signals, 'timeline_updated'):
+            global_signals.timeline_updated.emit()
 
     def _emit_selection_state(self):
         if not self.selected_ids:

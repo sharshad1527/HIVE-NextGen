@@ -2,12 +2,13 @@
 
 import os
 import hashlib
+from pathlib import Path
 import subprocess
 import re
 import struct
 import json
 from collections import deque
-from pathlib import Path
+import av
 from PySide6.QtCore import QThread, Signal
 from core.app_config import app_config
 
@@ -210,6 +211,72 @@ class ProxyGeneratorThread(QThread):
         else:
             self.proxy_failed.emit(self.file_path, "FFmpeg failed to generate proxy on both GPU and CPU.")
 
+class AudioConformThread(QThread):
+    """Background thread to perfectly conform audio to standard WAV using PyAV."""
+    progress_updated = Signal(str, int)
+    conform_finished = Signal(str, str)
+    conform_failed = Signal(str, str)
+
+    def __init__(self, file_path, cache_dir):
+        super().__init__()
+        self.file_path = file_path
+        self.cache_dir = Path(cache_dir)
+        
+        # Generate a unique cache name based on the file path
+        file_hash = hashlib.md5(file_path.encode()).hexdigest()
+        self.cache_path = str(self.cache_dir / f"{file_hash}_conformed.wav")
+        
+        # H.I.V.E Master Clock Settings
+        self.target_rate = 44100
+        self.target_format = 's16'
+
+    def run(self):
+        # If it already exists, skip processing
+        if os.path.exists(self.cache_path):
+            self.progress_updated.emit(self.file_path, 100)
+            self.conform_finished.emit(self.file_path, self.cache_path)
+            return
+
+        try:
+            import av # Ensure av is imported
+            
+            input_container = av.open(self.file_path)
+            if not input_container.streams.audio:
+                self.conform_failed.emit(self.file_path, "No audio stream found.")
+                return
+                
+            input_audio_stream = input_container.streams.audio[0]
+
+            output_container = av.open(self.cache_path, mode='w', format='wav')
+            output_audio_stream = output_container.add_stream('pcm_s16le', rate=self.target_rate)
+            output_audio_stream.layout = 'stereo' 
+
+            resampler = av.AudioResampler(format=self.target_format, layout='stereo', rate=self.target_rate)
+
+            # Processing loop
+            for packet in input_container.demux(input_audio_stream):
+                for frame in packet.decode():
+                    resampled_frames = resampler.resample(frame)
+                    if resampled_frames: 
+                        for out_packet in output_audio_stream.encode(resampled_frames):
+                            output_container.mux(out_packet)
+
+            # Flush buffers
+            for frame in resampler.resample(None):
+                for out_packet in output_audio_stream.encode(frame):
+                    output_container.mux(out_packet)
+            for out_packet in output_audio_stream.encode(None):
+                output_container.mux(out_packet)
+
+            input_container.close()
+            output_container.close()
+
+            self.progress_updated.emit(self.file_path, 100)
+            self.conform_finished.emit(self.file_path, self.cache_path)
+
+        except Exception as e:
+            self.conform_failed.emit(self.file_path, str(e))
+
 
 class MediaManager:
     """Handles parsing files, extracting metadata, generating thumbnails, and proxy queues."""
@@ -217,10 +284,12 @@ class MediaManager:
     def __init__(self):
         self.config_dir = Path.home() / ".hive_editor"
         self.thumb_dir = self.config_dir / "thumbnails"
-        self.proxy_dir = self.config_dir / "proxies" 
+        self.proxy_dir = self.config_dir / "proxies"
+        self.audio_cache_dir = self.config_dir / "audio_cache" 
         
         self.thumb_dir.mkdir(parents=True, exist_ok=True)
         self.proxy_dir.mkdir(parents=True, exist_ok=True)
+        self.audio_cache_dir.mkdir(parents=True, exist_ok=True)
         
         self.proxy_queue = deque()
         self.active_proxy_threads = set()
@@ -364,8 +433,21 @@ class MediaManager:
             return
             
         task = self.proxy_queue.popleft()
+
+        if task.get("type") == "audio_conform":
+            thread = AudioConformThread(task["file_path"], self.audio_cache_dir)
+            self.active_proxy_threads.add(thread)
+            
+            if task.get("on_finish_callback"):
+                thread.conform_finished.connect(task["on_finish_callback"])
+            if task.get("on_fail_callback"):
+                thread.conform_failed.connect(task["on_fail_callback"])
+                
+            thread.finished.connect(lambda t=thread: self._on_proxy_thread_finished(t))
+            thread.finished.connect(thread.deleteLater)
+            thread.start()
         
-        if "on_progress_callback" in task:
+        elif "on_progress_callback" in task:
             thread = ProxyGeneratorThread(task["file_path"], self.proxy_dir)
             self.active_proxy_threads.add(thread)
             
@@ -406,5 +488,16 @@ class MediaManager:
     def _on_waveform_ready(self, file_path, data):
         from core.signal_hub import global_signals
         global_signals.waveform_ready.emit(file_path, data)
+
+    def start_audio_conform(self, file_path, on_finish_callback=None, on_fail_callback=None):
+        """Pushes an audio conform request into the queue."""
+        task = {
+            "type": "audio_conform", # Explicitly name the task type
+            "file_path": file_path,
+            "on_finish_callback": on_finish_callback,
+            "on_fail_callback": on_fail_callback
+        }
+        self.proxy_queue.append(task)
+        self._process_next_proxy()
 
 media_manager = MediaManager()

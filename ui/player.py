@@ -2,6 +2,7 @@ import qtawesome as qta
 import os
 import time
 import hashlib
+from pathlib import Path
 import math
 from PySide6.QtWidgets import (QFrame, QVBoxLayout, QHBoxLayout, QPushButton, 
                                QLabel, QSlider, QWidget, QStackedWidget, QComboBox, QApplication)
@@ -14,7 +15,7 @@ from core.signal_hub import global_signals
 from core.project_manager import project_manager
 from core.render_engine import RenderEngine
 from core.app_config import app_config
-
+from core.audio_mixer import AudioMixer, AudioTrack
 
 class TimelinePreviewCanvas(QWidget):
     """Custom drawing surface for the RenderEngine frames with interactive clip manipulation."""
@@ -542,7 +543,8 @@ class PlayerPanel(QFrame):
         
         self._preview_aspect = (16, 9)
 
-        self.audio_players = {}
+        # self.audio_players = {}
+        self.audio_mixer = AudioMixer()
 
         self.play_timer = QTimer(self)
         self.play_timer.setTimerType(Qt.PreciseTimer)
@@ -697,15 +699,17 @@ class PlayerPanel(QFrame):
         global_signals.clip_selected.connect(self._on_clip_selected_for_preview)
         global_signals.clip_deselected.connect(self._on_clip_deselected_for_preview)
         global_signals.project_resolution_changed.connect(self._on_project_resolution_changed)
-        if hasattr(global_signals, 'clip_updated'):
-            global_signals.clip_updated.connect(self._on_clip_updated)
-        
+        global_signals.timeline_updated.connect(self._sync_mixer_to_timeline)
+
+        # Initial rebuild in case the project was already loaded before this panel was initialized
+        if project_manager.current_project:
+            self._rebuild_audio_mixer()
+
         if QApplication.instance():
             QApplication.instance().aboutToQuit.connect(self._cleanup)
 
     def _on_clip_updated(self, clip_data):
-        if not self.is_playing:
-            self._sync_timeline_audio(int(self.playhead))
+        self._rebuild_audio_mixer()
 
     def _force_refresh_render(self):
         if not self.is_playing:
@@ -950,113 +954,6 @@ class PlayerPanel(QFrame):
             else:
                 self.btn_play.setIcon(qta.icon('mdi6.play', color='#e66b2c'))
 
-    def _sync_timeline_audio(self, logical_pos):
-        project = project_manager.current_project
-        if not project: return
-        
-        active_clip_ids = set()
-        current_ms = int(logical_pos * 10)
-        
-        for track in project.tracks:
-            if track.is_muted or track.is_hidden: continue
-            for clip in track.clips:
-                if clip.clip_type in ["video", "audio"] and clip.file_path:
-                    if clip.start_time <= current_ms < clip.end_time:
-                        active_clip_ids.add(clip.clip_id)
-                        
-                        props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
-                        
-                        trim_in_ms = getattr(clip, 'trim_in', 0)
-                        fx_source_in = props.get("source_in", 0) * 10
-                        trim_in_ms = max(trim_in_ms, fx_source_in)
-                        local_ms = (current_ms - clip.start_time) + trim_in_ms
-                        
-                        # --- KEYFRAME AUDIO EVALUATION ---
-                        if hasattr(clip, 'get_animated_value'):
-                            rel_time = max(0.0, (current_ms - clip.start_time) / 10.0)
-                            vol_pct = clip.get_animated_value("Volume", rel_time, props.get("Volume", 100))
-                            pan = clip.get_animated_value("Pan", rel_time, props.get("Pan", 0)) / 100.0
-                            speed_pct = clip.get_animated_value("Speed", rel_time, props.get("Speed", 100))
-                        else:
-                            vol_pct = props.get("Volume", 100)
-                            pan = float(props.get("Pan", 0)) / 100.0
-                            speed_pct = float(props.get("Speed", 100))
-                        
-                        linear_vol = max(0.0, float(vol_pct) / 100.0)
-                        
-                        clip_duration_ms = clip.end_time - clip.start_time
-                        elapsed_ms = current_ms - clip.start_time
-                        fade_in_sec = float(props.get("Fade_In", 0))
-                        fade_out_sec = float(props.get("Fade_Out", 0))
-                        
-                        fade_in_ms = fade_in_sec * 1000.0
-                        fade_out_ms = fade_out_sec * 1000.0
-                        
-                        fade_mult = 1.0
-                        if fade_in_ms > 0 and elapsed_ms < fade_in_ms:
-                            fade_mult = min(1.0, elapsed_ms / fade_in_ms)
-                        if fade_out_ms > 0:
-                            remaining_ms = clip.end_time - current_ms
-                            if remaining_ms < fade_out_ms:
-                                fade_mult *= min(1.0, remaining_ms / fade_out_ms)
-                        
-                        effective_vol = linear_vol * fade_mult
-                        
-                        left_vol = effective_vol * max(0.0, 1.0 - pan)
-                        right_vol = effective_vol * max(0.0, 1.0 + pan)
-                        if pan != 0:
-                            left_vol = min(1.0, left_vol)
-                            right_vol = min(1.0, right_vol)
-                        
-                        playback_rate = max(0.1, min(4.0, speed_pct / 100.0))
-                        
-                        if clip.clip_id not in self.audio_players:
-                            player = QMediaPlayer()
-                            audio_output = QAudioOutput()
-                            audio_output.setVolume(effective_vol)
-                            player.setAudioOutput(audio_output)
-                            player.setSource(QUrl.fromLocalFile(clip.file_path))
-                            player.setPosition(local_ms)
-                            player.setPlaybackRate(playback_rate)
-                            
-                            if self.is_playing:
-                                player.play()
-                                
-                            self.audio_players[clip.clip_id] = {'player': player, 'output': audio_output}
-                        else:
-                            player = self.audio_players[clip.clip_id]['player']
-                            audio_output = self.audio_players[clip.clip_id]['output']
-                            
-                            audio_output.setVolume(effective_vol)
-                            
-                            if abs(player.playbackRate() - playback_rate) > 0.01:
-                                player.setPlaybackRate(playback_rate)
-                            
-                            if self.is_playing and player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
-                                player.play()
-                            elif not self.is_playing and player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
-                                player.pause()
-                                
-                            diff = abs(player.position() - local_ms)
-                            if self.is_playing:
-                                if diff > 800:
-                                    player.setPosition(local_ms)
-                            else:
-                                if diff > 50:
-                                    player.setPosition(local_ms)
-                                
-        stale_ids = set(self.audio_players.keys()) - active_clip_ids
-        for clip_id in stale_ids:
-            self.audio_players[clip_id]['player'].stop()
-            self.audio_players[clip_id]['player'].deleteLater()
-            self.audio_players[clip_id]['output'].deleteLater()
-            del self.audio_players[clip_id]
-
-
-    def _stop_all_timeline_audio(self):
-        for clip_id, data in self.audio_players.items():
-            data['player'].pause()
-
     def _on_play_step(self):
         if not hasattr(self, 'playback_start_time'):
             self.playback_start_time = time.time()
@@ -1075,7 +972,6 @@ class PlayerPanel(QFrame):
                 self.playhead = new_pos
                 self._update_timecode_label(preview=False)
                 self.render_engine.request_frame(int(self.playhead))
-                self._sync_timeline_audio(int(self.playhead))
             return
         
         if new_pos >= self.duration and self.duration > 0:
@@ -1085,9 +981,7 @@ class PlayerPanel(QFrame):
             
         self.playhead = new_pos
         self.render_engine.request_frame(int(new_pos))
-        self.playhead_seek_requested.emit(int(new_pos))
-        self._sync_timeline_audio(int(new_pos))
-        
+        self.playhead_seek_requested.emit(int(new_pos))        
         if hasattr(global_signals, 'playhead_moved'):
             global_signals.playhead_moved.emit(self.playhead)
 
@@ -1106,7 +1000,7 @@ class PlayerPanel(QFrame):
                 self.render_engine.set_playing(False)
                 self.btn_play.setIcon(qta.icon('mdi6.play', color='#e66b2c'))
                 if not self.is_timeline_preview:
-                    self._stop_all_timeline_audio()
+                    self.audio_mixer.pause() 
             else:
                 if not self.is_timeline_preview and self.playhead >= self.duration and self.duration > 0:
                     self.playhead_seek_requested.emit(0)
@@ -1118,12 +1012,84 @@ class PlayerPanel(QFrame):
                 self.render_engine.set_playing(True)
                 self.btn_play.setIcon(qta.icon('mdi6.pause', color='#e66b2c'))
                 if not self.is_timeline_preview:
-                    self._sync_timeline_audio(int(self.playhead))
+                    self.audio_mixer.play()
                 
             self.is_playing = not self.is_playing
             
             if hasattr(global_signals, 'playback_state_changed'):
                 global_signals.playback_state_changed.emit(self.is_playing)
+
+    
+        
+    def _sync_mixer_to_timeline(self):
+        """Called anytime a clip is dragged, trimmed, cut, or deleted."""
+        if project_manager.current_project:
+            self.audio_mixer.sync_from_project(project_manager.current_project)
+
+    def _rebuild_audio_mixer(self, *args):
+        """Scans the timeline and loads all audio/video clips into the AudioMixer."""
+        # 1. Clear the old tracks so we don't get duplicates
+        self.audio_mixer.clear_tracks()
+        
+        project = project_manager.current_project
+        if not project:
+            return
+
+        # 2. Iterate through every track and clip on the timeline
+        for track in project.tracks:
+            if getattr(track, 'is_muted', False) or getattr(track, 'is_hidden', False):
+                continue
+                
+            for clip in track.clips:
+                # 3. Only grab clips that actually contain audio
+                if clip.clip_type in ["video", "audio"] and getattr(clip, 'file_path', None):
+                    
+                    props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
+                    
+                    # Calculate trims (how much of the start was cut off)
+                    trim_in_ms = getattr(clip, 'trim_in', 0)
+                    fx_source_in = props.get("source_in", 0) * 10
+                    final_trim_in_ms = max(trim_in_ms, fx_source_in)
+
+                # 3. Only grab clips that actually contain audio
+                if clip.clip_type in ["video", "audio"] and getattr(clip, 'file_path', None):
+                    
+                    props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
+                    
+                    # Calculate trims
+                    trim_in_ms = getattr(clip, 'trim_in', 0)
+                    fx_source_in = props.get("source_in", 0) * 10
+                    final_trim_in_ms = max(trim_in_ms, fx_source_in)
+                    
+                    # --- NEW LOGIC: Look for Conformed Audio ---
+                    target_audio_path = clip.file_path
+                    file_hash = hashlib.md5(clip.file_path.encode()).hexdigest()
+                    conformed_path = Path.home() / ".hive_editor" / "audio_cache" / f"{file_hash}_conformed.wav"
+                    
+                    if conformed_path.exists():
+                        target_audio_path = str(conformed_path)
+                    
+                    # 4. Create our new AudioTrack
+                    audio_track = AudioTrack(
+                        clip_id=clip.clip_id,
+                        file_path=target_audio_path,  # Remember: If using proxy/extraction, pass the .wav path here!
+                        start_time_ms=clip.start_time,
+                        end_time_ms=clip.end_time,
+                        master_sample_rate=self.audio_mixer.sample_rate,
+                        trim_in_ms=final_trim_in_ms
+                    )
+                    
+                    # 5. Apply any static volume or panning from the UI properties
+                    vol_pct = props.get("Volume", 100)
+                    audio_track.volume = max(0.0, float(vol_pct) / 100.0)
+                    audio_track.pan = float(props.get("Pan", 0)) / 100.0
+                    
+                    # 6. Hand it to the engine!
+                    self.audio_mixer.add_track(audio_track)
+                    
+        # Sync the newly loaded tracks to the current playhead immediately
+        self.audio_mixer.seek(int(self.playhead * 10))
+        print(f"DUCKS IN THE ROW: Mixer rebuilt! Tracks loaded: {len(self.audio_mixer.tracks)}")
 
     def step_forward(self):
         if self.is_preview_mode and not self.is_timeline_preview:
@@ -1179,14 +1145,13 @@ class PlayerPanel(QFrame):
                     self.playback_start_time = time.time()
                     self.playback_start_playhead = self.playhead
         
-        # FIX: Always update the visual preview safely when scrolling or paused
         if not self.is_timeline_preview:
             self.render_engine.request_frame(self.playhead)
             
             if not self.is_playing:
-                self._sync_timeline_audio(int(self.playhead))
-                self._stop_all_timeline_audio()
-            
+                playhead_ms = int(self.playhead * 10)
+                self.audio_mixer.seek(playhead_ms)
+
             if self.duration > 0:
                 perc = int((self.playhead / self.duration) * 1000)
                 perc = max(0, min(1000, perc))
@@ -1234,8 +1199,5 @@ class PlayerPanel(QFrame):
             self.player.setAudioOutput(None)
             self.player.deleteLater()
             
-        for clip_id, data in self.audio_players.items():
-            data['player'].stop()
-            data['player'].deleteLater()
-            data['output'].deleteLater()
-        self.audio_players.clear()
+        if hasattr(self, 'audio_mixer'):
+            self.audio_mixer.close()

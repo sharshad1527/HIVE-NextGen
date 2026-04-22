@@ -18,6 +18,10 @@ class SignalHub(QObject):
     clip_deselected = Signal()        # FIXED: Added deselected state
     clip_updated = Signal(object)     # clip instance
     clip_transform_changed = Signal(str, str, object) # FIXED: clip_id, prop_name, value
+
+    # Clips Import & Delete
+    clip_added = Signal(str)      # Sends the new clip_id
+    clip_removed = Signal(str)    # Sends the deleted clip_id
     
     # Audio Background Processing
     waveform_ready = Signal(str, list) # FIXED: file_path, waveform_data
@@ -35,5 +39,8 @@ class SignalHub(QObject):
     clip_duplicate_requested = Signal()
     clip_delete_requested = Signal()
     paste_attributes_requested = Signal()
+
+
+    timeline_updated = Signal()
     
 global_signals = SignalHub()
