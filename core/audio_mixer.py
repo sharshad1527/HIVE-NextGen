@@ -1,8 +1,9 @@
 # core/audio_mixer.py
 import os
 import hashlib
-import threading
 import numpy as np
+import scipy.signal 
+import threading
 from pathlib import Path
 import soundfile as sf
 import sounddevice as sd

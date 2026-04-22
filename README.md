@@ -5,7 +5,9 @@
 <img src="assets/logos/HIVE_Logo_Mark.svg" alt="HIVE NextGen Logo" width="200"/>
 
 # HIVE NextGen
-
+> **⚠️ CURRENT STATUS: PRE-ALPHA (WORK IN PROGRESS)**
+> 
+> *The UI, timeline, and project management are functioning, but the core video rendering engine is currently under active development. Video export is not yet supported.*
 **The last video editor you'll ever need—without the monthly fee.**
 
 <!-- Badges -->
@@ -49,10 +51,9 @@ I built **HIVE NextGen** to fix this broken workflow. It is a streamlined, autom
 
 ## 📸 Visuals
 
-<!-- Replace the source below with your actual demo GIF path -->
 
 <div align="center">
-<img src="demo.gif" alt="HIVE NextGen Interface Demo" width="800" style="border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.2);"/>
+<img src="demo.gif" alt="HIVE NextGen Interface Demo SOON!!!!" width="800" style="border-radius: 8px; box-shadow: 0 4px 8px rgba(0,0,0,0.2);"/>
 
 <i>A quick look at the HIVE NextGen timeline, workspace, and rendering engine in action.</i>
 
