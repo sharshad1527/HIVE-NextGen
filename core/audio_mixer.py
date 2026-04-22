@@ -1,12 +1,11 @@
 # core/audio_mixer.py
 import os
-from pathlib import Path
 import hashlib
+import threading
+import numpy as np
+from pathlib import Path
 import soundfile as sf
 import sounddevice as sd
-import numpy as np
-import scipy.signal 
-import threading
 
 class AudioTrack:
     """Represents a single audio clip mapped to specific times on the timeline."""
