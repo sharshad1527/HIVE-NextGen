@@ -9,8 +9,11 @@ import struct
 import json
 from collections import deque
 import av
+import threading
 from PySide6.QtCore import QThread, Signal
 from core.app_config import app_config
+
+os.environ["OPENCV_FFMPEG_THREADS"] = "1"
 
 try:
     import cv2
@@ -240,12 +243,15 @@ class AudioConformThread(QThread):
         try:
             import av # Ensure av is imported
             
-            input_container = av.open(self.file_path)
+            input_container = av.open(self.file_path, options={'threads': '1'})  
+
             if not input_container.streams.audio:
                 self.conform_failed.emit(self.file_path, "No audio stream found.")
                 return
                 
             input_audio_stream = input_container.streams.audio[0]
+
+            input_audio_stream.thread_type = 'NONE'
 
             output_container = av.open(self.cache_path, mode='w', format='wav')
             output_audio_stream = output_container.add_stream('pcm_s16le', rate=self.target_rate)
@@ -257,8 +263,8 @@ class AudioConformThread(QThread):
             for packet in input_container.demux(input_audio_stream):
                 for frame in packet.decode():
                     resampled_frames = resampler.resample(frame)
-                    if resampled_frames: 
-                        for out_packet in output_audio_stream.encode(resampled_frames):
+                    for r_frame in resampled_frames: 
+                        for out_packet in output_audio_stream.encode(r_frame):
                             output_container.mux(out_packet)
 
             # Flush buffers
@@ -296,6 +302,7 @@ class MediaManager:
         self.max_concurrent_proxies = 2 # Strictly enforces limit to protect OS resources
         
         self._captures = {}
+        self._cap_lock = threading.Lock()
 
     def _get_capture(self, file_path):
         if not CV2_AVAILABLE:
@@ -309,9 +316,10 @@ class MediaManager:
         if not CV2_AVAILABLE or not os.path.exists(file_path):
             return None
             
-        cap = self._get_capture(file_path)
-        if not cap or not cap.isOpened():
-            return None
+        with self._cap_lock:
+            cap = self._get_capture(file_path)
+            if not cap or not cap.isOpened():
+                return None
             
         fps = cap.get(cv2.CAP_PROP_FPS)
         if fps <= 0: fps = 30.0
@@ -319,9 +327,6 @@ class MediaManager:
         target_frame = int(time_sec * fps)
         current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
         
-        # The Bug Fix: OpenCV `cap.read()` sequential read is efficient going forward.
-        # But if we jump backward (Reverse Play, Scrubbing left) OR jump far ahead, 
-        # we MUST force the frame pointer to seek explicitly.
         if target_frame < current_frame or target_frame > current_frame + 2:
             cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
             

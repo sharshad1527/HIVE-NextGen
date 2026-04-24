@@ -4,12 +4,14 @@ import os
 import time
 import random
 import copy
+import threading
+import queue
 from PySide6.QtCore import QThread, Signal, Qt, QObject, QMutex, QMutexLocker, QRectF
 from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen, QBrush, QRadialGradient
 from core.project_manager import project_manager
 from core.app_config import app_config
 from core.models import ClipData
-
+from core.video_decoder import VideoDecoder
 try:
     import cv2
     import numpy as np
@@ -68,8 +70,8 @@ class RenderEngine(QThread):
             self._force_render = True
 
     def _clear_readers(self):
-        for cap in self.video_readers.values():
-            cap.release()
+        for reader_data in self.video_readers.values():
+            reader_data["decoder"].stop()
         self.video_readers.clear()
 
     def stop(self):
@@ -95,7 +97,7 @@ class RenderEngine(QThread):
                     
                     stale_readers = [k for k in list(self.video_readers.keys()) if k not in active_clip_ids]
                     for k in stale_readers:
-                        self.video_readers[k].release()
+                        self.video_readers[k]["decoder"].stop()
                         del self.video_readers[k]
 
             elapsed = time.time() - start_time
@@ -285,10 +287,15 @@ class RenderEngine(QThread):
         
         if clip.clip_type == "video":
             reader_key = clip.clip_id 
-            if reader_key not in self.video_readers:
-                self.video_readers[reader_key] = cv2.VideoCapture(file_path)
             
-            cap = self.video_readers[reader_key]
+            # 1. Start the Background Cook (VideoDecoder) if it doesn't exist
+            if reader_key not in self.video_readers:
+                decoder = VideoDecoder(file_path)
+                decoder.start() # Start baking frames!
+                self.video_readers[reader_key] = {"decoder": decoder, "last_ms": 0}
+            
+            reader_data = self.video_readers[reader_key]
+            decoder = reader_data["decoder"]
             
             trim_in_ms = getattr(clip, 'trim_in', 0)
             props_local = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
@@ -296,35 +303,45 @@ class RenderEngine(QThread):
                 fx_source_in = clip.applied_effects.get("source_in", 0) * 10
                 trim_in_ms = max(trim_in_ms, fx_source_in)
                 
-            # --- VIDEO SPEED ---
-            # Speed is stored as a percentage (100 = normal, 200 = 2x fast, 50 = half-speed)
             speed_pct = props_local.get("Speed", 100)
             speed_factor = max(0.1, speed_pct / 100.0)
-            
             local_ms = ((current_ms - clip.start_time) * speed_factor) + trim_in_ms
-            current_pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
             
+            current_pos_ms = reader_data["last_ms"]
             diff = local_ms - current_pos_ms
             
-            if diff < -70 or diff > 200:
-                cap.set(cv2.CAP_PROP_POS_MSEC, local_ms)
-                ret, frame = cap.read()
-            else:
-                ret, frame = cap.read()
-                while ret and (local_ms - cap.get(cv2.CAP_PROP_POS_MSEC)) > 50:
-                    ret, frame = cap.read()
-                
-            if not ret:
-                fps = cap.get(cv2.CAP_PROP_FPS)
-                if fps > 0:
-                    total_ms = (cap.get(cv2.CAP_PROP_FRAME_COUNT) / fps) * 1000
-                    cap.set(cv2.CAP_PROP_POS_MSEC, max(0, total_ms - 100))
-                    ret, frame = cap.read()
+            ret = False
+            frame = None
 
-            if ret:
-                # Apply pixel-level effects before converting to QImage
+            # 2. Check if the user scrubbed the timeline fast
+            if diff < -70 or diff > 200:
+                decoder.seek_to(local_ms / 10.0) # Tell cook to restart at new time
+                try:
+                    # Wait up to 0.2 seconds for the new frame to be ready
+                    logical_pos, frame = decoder.frame_queue.get(timeout=0.2)
+                    reader_data["last_ms"] = logical_pos * 10.0
+                    ret = True
+                except queue.Empty:
+                    pass
+            else:
+                # 3. Normal Playback: Grab frames off the warming rack instantly!
+                while not decoder.frame_queue.empty():
+                    try:
+                        logical_pos, f = decoder.frame_queue.get_nowait()
+                        frame_ms = logical_pos * 10.0
+                        reader_data["last_ms"] = frame_ms
+                        
+                        # Stop grabbing when we hit the exact frame we need
+                        if (local_ms - frame_ms) <= 50:
+                            frame = f
+                            ret = True
+                            break
+                    except queue.Empty:
+                        break
+
+            if ret and frame is not None:
+                # Apply effects and send to UI!
                 frame = self._apply_cv_effects(frame, clip, current_ms)
-                
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 h, w, ch = frame.shape
                 bytes_per_line = ch * w

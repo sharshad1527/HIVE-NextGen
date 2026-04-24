@@ -1046,39 +1046,53 @@ class PlayerPanel(QFrame):
                     
                     props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
                     
-                    # Calculate trims (how much of the start was cut off)
-                    trim_in_ms = getattr(clip, 'trim_in', 0)
-                    fx_source_in = props.get("source_in", 0) * 10
-                    final_trim_in_ms = max(trim_in_ms, fx_source_in)
-
-                # 3. Only grab clips that actually contain audio
-                if clip.clip_type in ["video", "audio"] and getattr(clip, 'file_path', None):
-                    
-                    props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
-                    
                     # Calculate trims
                     trim_in_ms = getattr(clip, 'trim_in', 0)
                     fx_source_in = props.get("source_in", 0) * 10
                     final_trim_in_ms = max(trim_in_ms, fx_source_in)
                     
                     # --- NEW LOGIC: Look for Conformed Audio ---
-                    target_audio_path = clip.file_path
-                    file_hash = hashlib.md5(clip.file_path.encode()).hexdigest()
+                    normalized_path = clip.file_path.replace('\\', '/')
+                    file_hash = hashlib.md5(normalized_path.encode()).hexdigest()
                     conformed_path = Path.home() / ".hive_editor" / "audio_cache" / f"{file_hash}_conformed.wav"
+                    target_audio_path = clip.file_path
                     
                     if conformed_path.exists():
                         target_audio_path = str(conformed_path)
+
+                    elif clip.clip_type == "video":
+                        if file_hash not in self.audio_mixer.pending_extractions:
+                            print(f"Extracting audio for {clip.file_path}...")
+                            self.audio_mixer.pending_extractions.add(file_hash)
+                            
+                            from core.media_manager import media_manager
+                            
+                            def on_audio_ready(original_path, wav_path, f_hash=file_hash):
+                                print(f"Extraction complete! Rebuilding mixer...")
+                                self.audio_mixer.pending_extractions.discard(f_hash)
+                                self._rebuild_audio_mixer()
+                                
+                            def on_audio_fail(original_path, error_msg, f_hash=file_hash):
+                                print(f"Extraction FAILED: {error_msg}")
+                                self.audio_mixer.pending_extractions.discard(f_hash)
+                                
+                            media_manager.start_audio_conform(
+                                clip.file_path, 
+                                on_finish_callback=on_audio_ready,
+                                on_fail_callback=on_audio_fail
+                            )
+                        continue
                     
                     # 4. Create our new AudioTrack
                     audio_track = AudioTrack(
                         clip_id=clip.clip_id,
-                        file_path=target_audio_path,  # Remember: If using proxy/extraction, pass the .wav path here!
+                        file_path=target_audio_path,
                         start_time_ms=clip.start_time,
                         end_time_ms=clip.end_time,
                         master_sample_rate=self.audio_mixer.sample_rate,
                         trim_in_ms=final_trim_in_ms
                     )
-                    
+
                     # 5. Apply any static volume or panning from the UI properties
                     vol_pct = props.get("Volume", 100)
                     audio_track.volume = max(0.0, float(vol_pct) / 100.0)

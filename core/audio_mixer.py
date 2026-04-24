@@ -97,6 +97,7 @@ class AudioMixer:
         
         self.tracks = {}
         self.tracks_lock = threading.Lock()
+        self.pending_extractions = set()
         
         # Timeline Time Tracking
         self.is_playing = False
@@ -127,22 +128,50 @@ class AudioMixer:
                         
                         start_ms = clip.start_time
                         end_ms = clip.end_time
-                        trim_ms = clip.applied_effects.get("source_in", 0) * 10
+                        
+                        trim_in_ms = getattr(clip, 'trim_in', 0)
+                        fx_source_in = clip.applied_effects.get("source_in", 0) * 10
+                        final_trim_in_ms = max(trim_in_ms, fx_source_in)
+                        
                         vol_pct = float(clip.applied_effects.get("Volume", 100)) / 100.0
                         
                         if clip.clip_id in self.tracks:
                             # Update existing track directly (Trim/Move/Volume change)
-                            self.tracks[clip.clip_id].update_timing(start_ms, end_ms, trim_ms)
+                            self.tracks[clip.clip_id].update_timing(start_ms, end_ms, final_trim_in_ms)
                             self.tracks[clip.clip_id].update_properties(vol_pct)
                         else:
                             # Add newly dragged/cut clip
-
-                            target_audio_path = clip.file_path
-                            file_hash = hashlib.md5(clip.file_path.encode()).hexdigest()
+                            # 1. Standardize path and hash by FILE, not clip ID
+                            normalized_path = clip.file_path.replace('\\', '/')
+                            file_hash = hashlib.md5(normalized_path.encode()).hexdigest()
                             conformed_path = Path.home() / ".hive_editor" / "audio_cache" / f"{file_hash}_conformed.wav"
+                            target_audio_path = clip.file_path
                             
                             if conformed_path.exists():
                                 target_audio_path = str(conformed_path)
+                            elif clip.clip_type == "video":
+                                # 2. SPAM GUARD: Check the FILE HASH, not the clip ID
+                                if file_hash not in self.pending_extractions:
+                                    print(f"Extracting audio for {clip.file_path}...")
+                                    self.pending_extractions.add(file_hash)
+                                    
+                                    from core.media_manager import media_manager
+                                    
+                                    def on_audio_ready(original_path, wav_path, f_hash=file_hash):
+                                        print(f"Extraction complete! Resyncing mixer...")
+                                        self.pending_extractions.discard(f_hash)
+                                        self.sync_from_project(project)
+                                        
+                                    def on_audio_fail(original_path, error_msg, f_hash=file_hash):
+                                        print(f"Extraction FAILED: {error_msg}")
+                                        self.pending_extractions.discard(f_hash)
+                                        
+                                    media_manager.start_audio_conform(
+                                        clip.file_path, 
+                                        on_finish_callback=on_audio_ready,
+                                        on_fail_callback=on_audio_fail  
+                                    )
+                                continue
 
                             try:
                                 new_track = AudioTrack(
@@ -151,13 +180,13 @@ class AudioMixer:
                                     start_time_ms=start_ms,
                                     end_time_ms=end_ms,
                                     master_sample_rate=self.sample_rate,
-                                    trim_in_ms=trim_ms
+                                    trim_in_ms=final_trim_in_ms # 3. SYNC FIX: Use the calculated trim
                                 )
                                 new_track.update_properties(vol_pct)
                                 self.tracks[clip.clip_id] = new_track
                             except Exception as e:
                                 print(f"AudioMixer Error loading {clip.clip_id}: {e}")
-
+                                
             # Remove tracks that were deleted from the timeline
             # Cast keys to list to avoid runtime error during iteration deletion
             to_remove = [c_id for c_id in list(self.tracks.keys()) if c_id not in active_clip_ids]
