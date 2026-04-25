@@ -170,14 +170,14 @@ class ProxyGeneratorThread(QThread):
         hw_enabled = app_config.get_setting("hardware_acceleration", True)
 
         encoder = "libx264"
-        preset_args = ["-preset", "ultrafast", "-crf", "28"]
+        preset_args = ["-preset", "ultrafast", "-crf", "28", "-g", "10", "-tune", "fastdecode"]
         
         if hw_enabled:
             hw_enc = self._get_hw_encoder()
             if hw_enc:
                 encoder = hw_enc
                 if encoder == "h264_nvenc":
-                    preset_args = ["-preset", "p1", "-cq", "28"] 
+                    preset_args = ["-preset", "p1", "-cq", "28", "-g", "15"] 
                 elif encoder == "h264_videotoolbox":
                     preset_args = ["-q:v", "50"] 
                 elif encoder in ["h264_amf", "h264_qsv"]:
