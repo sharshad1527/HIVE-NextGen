@@ -46,7 +46,8 @@ class AppConfig:
             "proxy_resolution": "360p",
             "export_format": "MP4",
             "export_codec": "H.264",
-            "copy_media_to_project": False
+            "copy_media_to_project": False,
+            "playback_memory_limit": 1024
         }
         loaded_settings = self.data.get("settings", {})
         self.settings = {**default_settings, **loaded_settings}

@@ -40,6 +40,8 @@ class SignalHub(QObject):
     clip_delete_requested = Signal()
     paste_attributes_requested = Signal()
 
+    # Emits the new memory limit in MB
+    memory_limit_changed = Signal(int)
 
     timeline_updated = Signal()
     

@@ -7,6 +7,10 @@ import threading
 from PySide6.QtCore import QThread
 os.environ["OPENCV_FFMPEG_THREADS"] = "1"
 
+from core.frame_cache import FrameCache
+from core.app_config import app_config
+from core.signal_hub import global_signals
+
 class VideoDecoder(QThread):
     """
     The Producer Thread: Bakes frames in the background and places them on the warming rack (queue).
@@ -15,6 +19,11 @@ class VideoDecoder(QThread):
         super().__init__()
         self.file_path = file_path
         
+        limit_mb = app_config.get_setting("playback_memory_limit", 500)
+        limit_bytes = limit_mb * 1024 * 1024
+        self.frame_cache = FrameCache(max_memory_bytes=limit_bytes)
+        global_signals.memory_limit_changed.connect(self._update_cache_limit)
+
         # This is our warming rack. maxsize=30 prevents us from eating up all your RAM.
         self.frame_queue = queue.Queue(maxsize=buffer_size)
         self._run_flag = True
@@ -26,6 +35,11 @@ class VideoDecoder(QThread):
         
         # Step 1: Open the video file using OpenCV
         self.cap = cv2.VideoCapture(self.file_path)
+
+    def _update_cache_limit(self, new_limit_mb):
+        """Convert the new slider value to bytes and pass it to the cache."""
+        new_limit_bytes = new_limit_mb * 1024 * 1024
+        self.frame_cache.update_limit(new_limit_bytes)
 
     def stop(self):
         """Safely stops the thread and closes the video file."""

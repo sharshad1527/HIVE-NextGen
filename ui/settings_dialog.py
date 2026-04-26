@@ -1,12 +1,109 @@
 # ui/settings_dialog.py
 import qtawesome as qta
+import psutil
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                                QPushButton, QWidget, QStackedWidget, QListWidget, 
                                QListWidgetItem, QLineEdit, QFileDialog, QMessageBox,
                                QComboBox, QSpinBox, QCheckBox, QDoubleSpinBox, QFrame,
-                               QScrollArea)
-from PySide6.QtCore import Qt, QSize
+                               QScrollArea, QSlider,QSpacerItem, QSizePolicy)
+from PySide6.QtCore import Qt, QSize, Signal
 from core.app_config import app_config
+from core.signal_hub import global_signals
+
+class MemoryLimitSlider(QWidget):
+    # Signal emitted when the user releases the slider, sending the value in MB
+    memoryLimitSaved = Signal(int)
+
+    def __init__(self, current_limit_mb=500, parent=None):
+        super().__init__(parent)
+        
+        # --- 1. RAM Calculation Logic ---
+        # Get total system RAM in bytes and convert to Megabytes (MB)
+        total_ram_bytes = psutil.virtual_memory().total
+        self.total_ram_mb = int(total_ram_bytes / (1024 * 1024))
+        
+        # Set a safe upper limit (e.g., 40% of total system RAM)
+        self.max_limit_mb = int(self.total_ram_mb * 0.40)
+        self.min_limit_mb = 100  # Minimum cache size is 100MB
+        
+        # Ensure current limit is within bounds
+        self.current_val = max(self.min_limit_mb, min(current_limit_mb, self.max_limit_mb))
+
+        # --- 2. Main Layout ---
+        self.main_layout = QVBoxLayout(self)
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(5)
+
+        # Header Label (Updates dynamically)
+        self.header_label = QLabel(self._format_label(self.current_val))
+        self.header_label.setStyleSheet("font-weight: bold; color: #ffffff;")
+        self.main_layout.addWidget(self.header_label)
+
+        # --- 3. Visual Markers (Labels Above Slider) ---
+        self.marker_layout = QHBoxLayout()
+        self.marker_layout.setContentsMargins(5, 0, 5, 0) # Align with slider handle
+        
+        # Define the exact marker values we want to show
+        desired_markers = [100, 500, 1024, 2048]
+        self.markers = [m for m in desired_markers if m <= self.max_limit_mb]
+        if self.max_limit_mb not in self.markers:
+            self.markers.append(self.max_limit_mb)
+            
+        previous_val = self.min_limit_mb
+        for i, marker_val in enumerate(self.markers):
+            distance = marker_val - previous_val
+            if distance > 0:
+                self.marker_layout.addStretch(distance)
+            
+            lbl = QLabel(self._format_marker_text(marker_val))
+            lbl.setStyleSheet("color: #808080; font-size: 10px;")
+            lbl.setAlignment(Qt.AlignCenter)
+            self.marker_layout.addWidget(lbl)
+            previous_val = marker_val
+
+        self.main_layout.addLayout(self.marker_layout)
+
+        # --- 4. The Slider Logic ---
+        self.slider = QSlider(Qt.Horizontal)
+        self.slider.setRange(self.min_limit_mb, self.max_limit_mb)
+        self.slider.setValue(self.current_val)
+        self.slider.setTickPosition(QSlider.TicksBelow)
+        self.slider.setTickInterval(500)
+        
+        self.slider.setStyleSheet("""
+            QSlider::groove:horizontal {
+                border-radius: 4px; height: 8px; background: rgba(26, 26, 26, 0.8);
+                border: 1px solid rgba(255,255,255,0.1);
+            }
+            QSlider::sub-page:horizontal {
+                background: #e66b2c; border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #ffffff; width: 16px; margin-top: -4px; margin-bottom: -4px;
+                border-radius: 8px; border: 2px solid #e66b2c;
+            }
+            QSlider::handle:horizontal:hover { background: #e66b2c; }
+        """)
+
+        self.slider.valueChanged.connect(self._on_value_changed)
+        self.slider.sliderReleased.connect(self._on_slider_released)
+        self.main_layout.addWidget(self.slider)
+
+    def _format_marker_text(self, mb_val):
+        if mb_val == self.max_limit_mb: return "Max"
+        if mb_val >= 1024: return f"{mb_val // 1024}GB"
+        return f"{mb_val}MB"
+
+    def _format_label(self, mb_val):
+        current_gb = mb_val / 1024
+        max_gb = self.max_limit_mb / 1024
+        return f"Playback Frame Cache: {current_gb:.1f} GB / {max_gb:.1f} GB"
+
+    def _on_value_changed(self, value):
+        self.header_label.setText(self._format_label(value))
+
+    def _on_slider_released(self):
+        self.memoryLimitSaved.emit(self.slider.value())
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -353,8 +450,30 @@ class SettingsDialog(QDialog):
         size_layout.addWidget(btn_clear)
         layout.addLayout(size_layout)
 
+        layout.addWidget(self._create_separator())
+        
+        lbl_header4 = QLabel("Memory Allocation")
+        lbl_header4.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff; margin-top: 10px; margin-bottom: 5px;")
+        layout.addWidget(lbl_header4)
+
+        lbl_mem_desc = QLabel("Set the maximum RAM allowed for the playback frame cache.")
+        lbl_mem_desc.setStyleSheet("color: #808080; font-size: 11px; margin-bottom: 10px;")
+        layout.addWidget(lbl_mem_desc)
+
+        current_limit = app_config.get_setting("playback_memory_limit", 1024)
+        
+        self.mem_slider = MemoryLimitSlider(current_limit_mb=current_limit)
+        
+        self.mem_slider.memoryLimitSaved.connect(self._on_memory_limit_saved)
+        
+        layout.addWidget(self.mem_slider)
+
         scroll_area.setWidget(page)
         return scroll_area
+
+    def _on_memory_limit_saved(self, new_limit_mb):
+        app_config.set_setting("playback_memory_limit", new_limit_mb)
+        global_signals.memory_limit_changed.emit(new_limit_mb)
 
     def browse_project_path(self):
         dir_path = QFileDialog.getExistingDirectory(self, "Select Default Project Folder", str(app_config.default_project_path))
