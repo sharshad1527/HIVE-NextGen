@@ -167,7 +167,7 @@ class ProxyGeneratorThread(QThread):
 
         res_setting = app_config.get_setting("proxy_resolution", "360p")
         height = res_setting.replace("p", "")
-        hw_enabled = app_config.get_setting("hardware_acceleration", True)
+        hw_enabled = app_config.get_setting("hardware_acceleration_enabled", True)
 
         encoder = "libx264"
         preset_args = ["-preset", "ultrafast", "-crf", "28", "-g", "10", "-tune", "fastdecode"]

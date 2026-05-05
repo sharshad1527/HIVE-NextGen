@@ -392,8 +392,8 @@ class SettingsDialog(QDialog):
         layout.addWidget(lbl_header)
 
         chk_gpu = QCheckBox("Enable Hardware Acceleration (GPU Decoding/Encoding)")
-        chk_gpu.setChecked(app_config.get_setting("hardware_acceleration"))
-        chk_gpu.stateChanged.connect(lambda v: app_config.set_setting("hardware_acceleration", bool(v)))
+        chk_gpu.setChecked(app_config.get_setting("hardware_acceleration_enabled"))
+        chk_gpu.stateChanged.connect(lambda v: app_config.set_setting("hardware_acceleration_enabled", bool(v)))
         layout.addWidget(chk_gpu)
         
         lbl_gpu_desc = QLabel("Improves playback and export times utilizing NVENC/VideoToolbox.")

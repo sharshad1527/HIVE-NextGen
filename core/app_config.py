@@ -4,6 +4,7 @@ import os
 import json
 import shutil
 import time
+import platform
 from datetime import datetime
 from pathlib import Path
 
@@ -14,6 +15,9 @@ class AppConfig:
         self.config_dir = Path.home() / ".hive_editor"
         self.config_file = self.config_dir / "config.json"
         
+        # Detect OS once on startup
+        self.os_type = platform.system() # 'Windows', 'Darwin' (Mac), or 'Linux'
+
         # Setup Default Paths
         self.default_project_path = Path.home() / "Documents" / "HAVE_Projects"
         self.default_export_path = Path.home() / "Videos" / "HAVE_Exports"
@@ -41,17 +45,21 @@ class AppConfig:
             "auto_save_interval": 5,
             "default_resolution": "1920x1080",
             "default_fps": "30",
-            "hardware_acceleration": True,
+            "hardware_acceleration_enabled": True,
             "auto_proxies": True,
             "proxy_resolution": "360p",
             "export_format": "MP4",
             "export_codec": "H.264",
             "copy_media_to_project": False,
-            "playback_memory_limit": 1024
+            "playback_memory_limit": 1024,
+            "os": self.os_type
         }
         loaded_settings = self.data.get("settings", {})
         self.settings = {**default_settings, **loaded_settings}
         self.data["settings"] = self.settings
+        
+        # Ensure OS is always up to date in settings
+        self.settings["os"] = self.os_type
         
         # Clean up the trash bin automatically
         self.cleanup_bin()
