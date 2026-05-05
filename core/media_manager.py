@@ -303,6 +303,26 @@ class MediaManager:
         
         self._captures = {}
         self._cap_lock = threading.Lock()
+        self.hw_encoder = None
+
+    def probe_hardware(self):
+        """Probes for FFmpeg hardware encoders once and caches the result."""
+        try:
+            kwargs = {}
+            if os.name == 'nt':
+                kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+            result = subprocess.run(["ffmpeg", "-hide_banner", "-encoders"], capture_output=True, text=True, **kwargs)
+            output = result.stdout.lower()
+            
+            if "h264_nvenc" in output: self.hw_encoder = "h264_nvenc"
+            elif "h264_videotoolbox" in output: self.hw_encoder = "h264_videotoolbox"
+            elif "h264_amf" in output: self.hw_encoder = "h264_amf"
+            elif "h264_qsv" in output: self.hw_encoder = "h264_qsv"
+            
+            print(f"MediaManager: Hardware probe finished. Encoder: {self.hw_encoder or 'None (Software)'}")
+        except Exception as e:
+            print(f"MediaManager: Hardware probe failed: {e}")
+            self.hw_encoder = None
 
     def _get_capture(self, file_path):
         if not CV2_AVAILABLE:
