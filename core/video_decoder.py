@@ -10,6 +10,7 @@ from PySide6.QtCore import QThread
 from core.frame_cache import FrameCache
 from core.app_config import app_config
 from core.signal_hub import global_signals
+from core.logger import hive_logger
 
 class VideoDecoder(QThread):
     """
@@ -56,18 +57,19 @@ class VideoDecoder(QThread):
             if selected_device:
                 try:
                     hwaccel = av.codec.hwaccel.HWAccel(device_type=selected_device)
-                    print(f"VideoDecoder: Initializing with Hardware Acceleration ({selected_device})")
+                    hive_logger.info(f"VideoDecoder: Initializing with Hardware Acceleration ({selected_device}) for {os.path.basename(self.file_path)}")
                 except Exception as e:
-                    print(f"VideoDecoder: Failed to initialize HWAccel {selected_device}: {e}")
+                    hive_logger.warning(f"VideoDecoder: Failed to initialize HWAccel {selected_device}: {e}")
             
             self.container = av.open(self.file_path, hwaccel=hwaccel)
             self.video_stream = self.container.streams.video[0]
             # Use multi-threading for software fallback if possible
             if not hwaccel:
+                hive_logger.debug(f"VideoDecoder: Using software decoding for {os.path.basename(self.file_path)}")
                 self.video_stream.thread_type = 'AUTO'
                 
         except Exception as e:
-            print(f"VideoDecoder: Critical error opening container: {e}")
+            hive_logger.error(f"VideoDecoder: Critical error opening container for {self.file_path}: {e}")
 
     def _update_cache_limit(self, new_limit_mb):
         """Convert the new slider value to bytes and pass it to the cache."""
@@ -101,7 +103,7 @@ class VideoDecoder(QThread):
         try:
             frame_generator = self.container.decode(video=0)
         except Exception as e:
-            print(f"VideoDecoder: Failed to start decode generator: {e}")
+            hive_logger.error(f"VideoDecoder: Failed to start decode generator for {os.path.basename(self.file_path)}: {e}")
             return
 
         while self._run_flag:
@@ -109,11 +111,14 @@ class VideoDecoder(QThread):
             with self._seek_lock:
                 if self._seek_requested:
                     try:
+                        seek_start = time.time()
                         target_pts = int((self._seek_target_ms / 1000.0) / self.video_stream.time_base)
                         self.container.seek(target_pts, stream=self.video_stream)
                         frame_generator = self.container.decode(video=0)
+                        seek_latency = (time.time() - seek_start) * 1000.0
+                        hive_logger.debug(f"VideoDecoder: Seek latency for {os.path.basename(self.file_path)}: {seek_latency:.2f}ms")
                     except Exception as e:
-                        print(f"VideoDecoder: Seek failed: {e}")
+                        hive_logger.warning(f"VideoDecoder: Seek failed for {os.path.basename(self.file_path)}: {e}")
                     self._seek_requested = False
                     continue
             
@@ -138,7 +143,7 @@ class VideoDecoder(QThread):
                     time.sleep(0.05)
                 except Exception as e:
                     # Specific handling for packet errors
-                    print(f"VideoDecoder: Decoding error: {e}")
+                    hive_logger.debug(f"VideoDecoder: Decoding error in {os.path.basename(self.file_path)}: {e}")
                     time.sleep(0.05)
             else:
                 # Rack is full, chill for a bit

@@ -24,6 +24,7 @@ class AppConfig:
         self.proxy_cache_path = self.config_dir / "proxies" 
         self.thumbnail_cache_path = self.config_dir / "thumbnails"
         self.waveform_cache_path = self.config_dir / "waveforms"
+        self.logs_dir = self.config_dir / "logs"
         
         # Ensure directories exist
         self.config_dir.mkdir(parents=True, exist_ok=True)
@@ -32,6 +33,7 @@ class AppConfig:
         self.proxy_cache_path.mkdir(parents=True, exist_ok=True)
         self.thumbnail_cache_path.mkdir(parents=True, exist_ok=True)
         self.waveform_cache_path.mkdir(parents=True, exist_ok=True)
+        self.logs_dir.mkdir(parents=True, exist_ok=True)
         
         self.data = self._load()
         
@@ -52,6 +54,7 @@ class AppConfig:
             "export_codec": "H.264",
             "copy_media_to_project": False,
             "playback_memory_limit": 1024,
+            "logging_level": "INFO",
             "os": self.os_type
         }
         loaded_settings = self.data.get("settings", {})

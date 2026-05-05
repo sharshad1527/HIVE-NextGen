@@ -21,6 +21,7 @@ from core.project_manager import project_manager
 from core.app_config import app_config
 from core.font_manager import font_manager
 from core.media_manager import media_manager
+from core.logger import logger_manager
 from utils.paths import get_asset_path
 
 class StartupWorker(QThread):
@@ -200,6 +201,11 @@ class AppController:
         self.app.setQuitOnLastWindowClosed(False)
         
         self.load_stylesheet()
+
+        # Phase 1: Logging
+        log_level = app_config.get_setting("logging_level", "INFO")
+        is_verbose = "--verbose" in sys.argv or log_level == "DEBUG"
+        logger_manager.setup(app_config.logs_dir, verbose=is_verbose)
 
         # Phase 2: Orchestration
         self.splash = SplashWindow()

@@ -1,11 +1,16 @@
 # ui/settings_dialog.py
 import qtawesome as qta
 import psutil
+import os
+import platform
+import subprocess
 from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QLabel, 
                                QPushButton, QWidget, QStackedWidget, QListWidget, 
                                QListWidgetItem, QLineEdit, QFileDialog, QMessageBox,
                                QComboBox, QSpinBox, QCheckBox, QDoubleSpinBox, QFrame,
-                               QScrollArea, QSlider,QSpacerItem, QSizePolicy)
+                               QScrollArea, QSlider,QSpacerItem, QSizePolicy,
+                               QPlainTextEdit)
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtCore import Qt, QSize, Signal
 from core.app_config import app_config
 from core.signal_hub import global_signals
@@ -187,7 +192,7 @@ class SettingsDialog(QDialog):
         # Sidebar
         self.sidebar = QListWidget()
         self.sidebar.setFixedWidth(150)
-        for tab_name in ["General", "Editing", "Export", "Performance"]:
+        for tab_name in ["General", "Editing", "Export", "Performance", "Logs"]:
             item = QListWidgetItem(tab_name)
             self.sidebar.addItem(item)
         
@@ -199,10 +204,14 @@ class SettingsDialog(QDialog):
         self.stack.addWidget(self.create_editing_page())
         self.stack.addWidget(self.create_export_page())
         self.stack.addWidget(self.create_performance_page())
+        self.stack.addWidget(self.create_logs_page())
 
         content_layout.addWidget(self.sidebar)
         content_layout.addWidget(self.stack)
         main_layout.addLayout(content_layout)
+
+        # Connect Logging Signal
+        global_signals.log_emitted.connect(self._on_log_emitted)
 
         self.sidebar.setCurrentRow(0)
 
@@ -491,3 +500,114 @@ class SettingsDialog(QDialog):
         freed = app_config.clear_cache()
         self.lbl_cache_size.setText(f"Current Cache Size:  {app_config.calculate_cache_size()}")
         QMessageBox.information(self, "Cache Cleared", f"Successfully freed {freed} of space.")
+
+    def create_logs_page(self):
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setAlignment(Qt.AlignTop)
+        layout.setSpacing(15)
+
+        lbl_header = QLabel("System Logs")
+        lbl_header.setStyleSheet("font-size: 16px; font-weight: bold; color: #ffffff; margin-bottom: 5px;")
+        layout.addWidget(lbl_header)
+
+        # Logging Level Row
+        level_layout = QHBoxLayout()
+        lbl_level = QLabel("Logging Level:")
+        lbl_level.setStyleSheet("font-weight: bold;")
+        
+        self.cb_level = QComboBox()
+        self.cb_level.addItems(["DEBUG", "INFO", "WARNING", "ERROR"])
+        current_level = app_config.get_setting("logging_level", "INFO")
+        self.cb_level.setCurrentText(current_level)
+        self.cb_level.setFixedWidth(120)
+        self.cb_level.currentTextChanged.connect(self.change_logging_level)
+        
+        level_layout.addWidget(lbl_level)
+        level_layout.addStretch()
+        level_layout.addWidget(self.cb_level)
+        layout.addLayout(level_layout)
+
+        # Log Viewer
+        self.log_viewer = QPlainTextEdit()
+        self.log_viewer.setReadOnly(True)
+        
+        # Populate with existing session buffer
+        from core.logger import logger_manager
+        self.log_viewer.setPlainText("\n".join(logger_manager.log_buffer))
+        
+        # Auto-scroll to bottom if there's content
+        if logger_manager.log_buffer:
+             self.log_viewer.verticalScrollBar().setValue(self.log_viewer.verticalScrollBar().maximum())
+
+        self.log_viewer.setStyleSheet("""
+            QPlainTextEdit {
+                background-color: #0a0a0a;
+                color: #d1d1d1;
+                font-family: 'Consolas', 'Monaco', monospace;
+                font-size: 11px;
+                border: 1px solid #262626;
+                border-radius: 6px;
+                padding: 10px;
+            }
+        """)
+        layout.addWidget(self.log_viewer)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        
+        btn_open_folder = QPushButton(qta.icon('mdi6.folder-open', color='#ffffff'), " Open Log Folder")
+        btn_open_folder.setCursor(Qt.PointingHandCursor)
+        btn_open_folder.setStyleSheet("""
+            QPushButton {
+                background-color: #6750A4; color: #ffffff; border: none;
+                border-radius: 6px; padding: 8px 16px; font-weight: bold;
+            }
+            QPushButton:hover { background-color: #7b61c4; }
+        """)
+        btn_open_folder.clicked.connect(self.open_log_folder)
+
+        btn_copy = QPushButton(qta.icon('mdi6.content-copy', color='#ffffff'), " Copy Logs")
+        btn_copy.setCursor(Qt.PointingHandCursor)
+        btn_copy.setStyleSheet("""
+            QPushButton {
+                background-color: rgba(255, 255, 255, 0.05); color: #d1d1d1;
+                border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 6px; padding: 8px 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: rgba(255, 255, 255, 0.1); color: #ffffff; }
+        """)
+        btn_copy.clicked.connect(self.copy_logs)
+
+        btn_layout.addWidget(btn_open_folder)
+        btn_layout.addStretch()
+        btn_layout.addWidget(btn_copy)
+        layout.addLayout(btn_layout)
+
+        return page
+
+    def _on_log_emitted(self, message, level):
+        if hasattr(self, 'log_viewer'):
+            self.log_viewer.appendPlainText(message)
+            # Auto-scroll to bottom
+            self.log_viewer.verticalScrollBar().setValue(self.log_viewer.verticalScrollBar().maximum())
+
+    def open_log_folder(self):
+        path = str(app_config.logs_dir)
+        if platform.system() == "Windows":
+            os.startfile(path)
+        elif platform.system() == "Darwin":
+            subprocess.Popen(["open", path])
+        else:
+            subprocess.Popen(["xdg-open", path])
+
+    def copy_logs(self):
+        if hasattr(self, 'log_viewer'):
+            QGuiApplication.clipboard().setText(self.log_viewer.toPlainText())
+            # Optional: Show a small toast or change button text briefly
+            # For now, just a simple message box or nothing to stay lean
+
+    def change_logging_level(self, level_name):
+        app_config.set_setting("logging_level", level_name)
+        from core.logger import logger_manager
+        logger_manager.set_level(level_name)

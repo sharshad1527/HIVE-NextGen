@@ -10,6 +10,7 @@ from dataclasses import asdict, fields
 from .models import ProjectData, TrackData, ClipData
 from .signal_hub import global_signals
 from .app_config import app_config
+from .logger import hive_logger
 
 class ProjectManager:
     """Handles the saving, loading, and state management of the Hive video project."""
@@ -54,14 +55,14 @@ class ProjectManager:
 
     def save_project(self, save_path=None, duration_str="00:00:00:00"):
         if not self.current_project:
-            print("No active project to save.")
+            hive_logger.warning("No active project to save.")
             return False
             
         if save_path:
             self.project_path = save_path
             
         if not self.project_path:
-            print("No save path provided.")
+            hive_logger.warning("No save path provided for project save.")
             return False
             
         if not self.project_path.endswith('.hive'):
@@ -78,10 +79,10 @@ class ProjectManager:
             app_config.add_recent_project(self.current_project.name, self.project_path, duration_str)
             
             global_signals.project_saved.emit(self.project_path)
-            print(f"Project saved successfully to {self.project_path}")
+            hive_logger.info(f"Project saved successfully to {self.project_path}")
             return True
         except Exception as e:
-            print(f"Error saving project: {e}")
+            hive_logger.error(f"Error saving project to {self.project_path}: {e}")
             return False
 
     def soft_delete_project(self, file_path):
@@ -111,9 +112,10 @@ class ProjectManager:
             app_config.data["recent_projects"] = recent
             app_config._save()
             
+            hive_logger.info(f"Project soft-deleted: {file_path}")
             return True
         except Exception as e:
-            print(f"Error deleting project: {e}")
+            hive_logger.error(f"Error soft-deleting project {file_path}: {e}")
             return False
 
     def get_trashed_projects(self):
@@ -154,9 +156,10 @@ class ProjectManager:
                     app_config.add_recent_project(dest.name, str(hive_files[0]))
             else:
                 app_config.add_recent_project(dest.stem, str(dest))
+            hive_logger.info(f"Project recovered from {trash_path} to {dest}")
             return True
         except Exception as e:
-            print(f"Failed to recover: {e}")
+            hive_logger.error(f"Failed to recover project {trash_path}: {e}")
             return False
 
     def permanent_delete(self, trash_path):
@@ -167,9 +170,10 @@ class ProjectManager:
                 shutil.rmtree(str(src))
             else:
                 src.unlink()
+            hive_logger.info(f"Project permanently deleted: {trash_path}")
             return True
         except Exception as e:
-            print(f"Failed to delete permanently: {e}")
+            hive_logger.error(f"Failed to delete permanently {trash_path}: {e}")
             return False
             
     def rename_project(self, old_path, new_name):
@@ -205,15 +209,16 @@ class ProjectManager:
             app_config.data["recent_projects"] = recent
             app_config.add_recent_project(new_name, new_path, duration_str)
             
+            hive_logger.info(f"Project renamed from {old_path} to {new_name}")
             return True
             
         except Exception as e:
-            print(f"Error renaming project: {e}")
+            hive_logger.error(f"Error renaming project {old_path} to {new_name}: {e}")
             return False
 
     def load_project(self, load_path):
         if not os.path.exists(load_path):
-            print("File does not exist.")
+            hive_logger.error(f"Failed to load project: File does not exist at {load_path}")
             return False
             
         try:
@@ -226,12 +231,12 @@ class ProjectManager:
             app_config.add_recent_project(self.current_project.name, self.project_path)
             
             global_signals.project_loaded.emit(self.current_project)
-            print(f"Project loaded successfully from {load_path}")
+            hive_logger.info(f"Project loaded successfully from {load_path}")
             return True
             
         except Exception as e:
             # Prevent silent failures if a corrupted file exists
-            print(f"Failed to load project: {e}")
+            hive_logger.error(f"Failed to load project from {load_path}: {e}")
             return False
 
     def _rebuild_project_from_dict(self, data: dict) -> ProjectData:

@@ -44,5 +44,8 @@ class SignalHub(QObject):
     memory_limit_changed = Signal(int)
 
     timeline_updated = Signal()
+
+    # Logging
+    log_emitted = Signal(str, str) # log_entry, levelname
     
 global_signals = SignalHub()

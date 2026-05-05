@@ -8,6 +8,7 @@ import threading
 import queue
 from PySide6.QtCore import QThread, Signal, Qt, QObject, QMutex, QMutexLocker, QRectF
 from PySide6.QtGui import QImage, QPainter, QColor, QFont, QPen, QBrush, QRadialGradient
+from core.logger import hive_logger
 from core.project_manager import project_manager
 from core.app_config import app_config
 from core.models import ClipData
@@ -39,6 +40,7 @@ class RenderEngine(QThread):
         self._run_flag = True
         self._force_render = False
         self.preview_preset = None
+        hive_logger.info("RenderEngine initialized.")
 
     def request_frame(self, logical_time):
         """Called by the UI when the playhead moves (scrubbing or stepping)."""
@@ -50,6 +52,7 @@ class RenderEngine(QThread):
     def set_playing(self, playing):
         with QMutexLocker(self.mutex):
             self.is_playing = playing
+            hive_logger.info(f"Playback {'started' if playing else 'stopped'}.")
             
     def set_render_fps(self, fps):
         with QMutexLocker(self.mutex):
@@ -75,11 +78,14 @@ class RenderEngine(QThread):
         self.video_readers.clear()
 
     def stop(self):
+        hive_logger.info("Stopping RenderEngine...")
         self._run_flag = False
         self._clear_readers()
         self.wait()
+        hive_logger.info("RenderEngine stopped.")
 
     def run(self):
+        hive_logger.info("RenderEngine thread started.")
         while self._run_flag:
             start_time = time.time()
             
@@ -163,6 +169,7 @@ class RenderEngine(QThread):
 
     def _composite_frame(self, logical_time):
         if not CV2_AVAILABLE:
+            hive_logger.error("OpenCV (cv2) not available. Cannot render frame.")
             return self._create_error_frame("OpenCV (cv2) is not installed.\nPlease install opencv-python."), set()
 
         project = project_manager.current_project

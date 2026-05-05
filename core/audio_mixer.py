@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 import soundfile as sf
 import sounddevice as sd
+from core.logger import hive_logger
 
 class AudioTrack:
     """Represents a single audio clip mapped to specific times on the timeline."""
@@ -110,6 +111,7 @@ class AudioMixer:
             blocksize=4096,
             callback=self._audio_callback
         )
+        hive_logger.info(f"AudioMixer initialized (SR: {self.sample_rate}, Channels: {self.channels})")
 
     def sync_from_project(self, project):
         """Diffs the current timeline state and intelligently updates tracks."""
@@ -152,18 +154,18 @@ class AudioMixer:
                             elif clip.clip_type == "video":
                                 # 2. SPAM GUARD: Check the FILE HASH, not the clip ID
                                 if file_hash not in self.pending_extractions:
-                                    print(f"Extracting audio for {clip.file_path}...")
+                                    hive_logger.info(f"Extracting audio for {clip.file_path}...")
                                     self.pending_extractions.add(file_hash)
                                     
                                     from core.media_manager import media_manager
                                     
                                     def on_audio_ready(original_path, wav_path, f_hash=file_hash):
-                                        print(f"Extraction complete! Resyncing mixer...")
+                                        hive_logger.info(f"Extraction complete for {original_path}! Resyncing mixer...")
                                         self.pending_extractions.discard(f_hash)
                                         self.sync_from_project(project)
                                         
                                     def on_audio_fail(original_path, error_msg, f_hash=file_hash):
-                                        print(f"Extraction FAILED: {error_msg}")
+                                        hive_logger.error(f"Extraction FAILED for {original_path}: {error_msg}")
                                         self.pending_extractions.discard(f_hash)
                                         
                                     media_manager.start_audio_conform(
@@ -185,7 +187,7 @@ class AudioMixer:
                                 new_track.update_properties(vol_pct)
                                 self.tracks[clip.clip_id] = new_track
                             except Exception as e:
-                                print(f"AudioMixer Error loading {clip.clip_id}: {e}")
+                                hive_logger.error(f"AudioMixer Error loading {clip.clip_id}: {e}")
                                 
             # Remove tracks that were deleted from the timeline
             # Cast keys to list to avoid runtime error during iteration deletion
@@ -204,7 +206,7 @@ class AudioMixer:
         with self.tracks_lock:
             # FIX: Insert into the dictionary properly using the clip_id
             self.tracks[track.clip_id] = track
-        print(f"Added track: {track.clip_id}")
+        hive_logger.debug(f"Added track: {track.clip_id}")
 
     def clear_tracks(self):
         """Clears all tracks from the mixer when loading a new project."""
@@ -227,7 +229,7 @@ class AudioMixer:
     def _audio_callback(self, outdata, frames, time_info, status):
         """The C-level thread that runs hundreds of times a second."""
         if status:
-            print(f"Audio Status Warning: {status}")
+            hive_logger.debug(f"Audio Status Warning: {status}")
 
         mixed_chunk = np.zeros((frames, self.channels), dtype=np.float32)
 
