@@ -111,6 +111,27 @@ class MemoryLimitSlider(QWidget):
         self.memoryLimitSaved.emit(self.slider.value())
 
 class SettingsDialog(QDialog):
+    def exec(self):
+        # Visual feedback: Turn on the settings icon highlight
+        sidebar = None
+        if self.parent() and hasattr(self.parent(), "sidebar"):
+            sidebar = self.parent().sidebar
+            if hasattr(sidebar, "btn_settings"):
+                # Use a specific property to force update style
+                sidebar.btn_settings.setProperty("active_dialog", True)
+                sidebar.btn_settings.style().unpolish(sidebar.btn_settings)
+                sidebar.btn_settings.style().polish(sidebar.btn_settings)
+
+        result = super().exec()
+        
+        # Visual feedback: Turn off the highlight
+        if sidebar and hasattr(sidebar, "btn_settings"):
+             sidebar.btn_settings.setProperty("active_dialog", False)
+             sidebar.btn_settings.style().unpolish(sidebar.btn_settings)
+             sidebar.btn_settings.style().polish(sidebar.btn_settings)
+        
+        return result
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Global Settings")

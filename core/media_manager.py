@@ -1,6 +1,9 @@
 # core/media_manager.py
 
 import os
+# SILENCE OPENCV POPUPS: Prefer FFmpeg/DirectShow over MSMF which spawns windows
+os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
+
 import hashlib
 from pathlib import Path
 import subprocess
@@ -292,10 +295,13 @@ class MediaManager:
         self.thumb_dir = self.config_dir / "thumbnails"
         self.proxy_dir = self.config_dir / "proxies"
         self.audio_cache_dir = self.config_dir / "audio_cache" 
+        self.metadata_cache_file = self.config_dir / "media_metadata.json"
         
         self.thumb_dir.mkdir(parents=True, exist_ok=True)
         self.proxy_dir.mkdir(parents=True, exist_ok=True)
         self.audio_cache_dir.mkdir(parents=True, exist_ok=True)
+        
+        self.metadata_cache = self._load_metadata_cache()
         
         self.proxy_queue = deque()
         self.active_proxy_threads = set()
@@ -305,8 +311,30 @@ class MediaManager:
         self._cap_lock = threading.Lock()
         self.hw_encoder = None
 
+    def _load_metadata_cache(self):
+        if self.metadata_cache_file.exists():
+            try:
+                with open(self.metadata_cache_file, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                pass
+        return {}
+
+    def _save_metadata_cache(self):
+        try:
+            with open(self.metadata_cache_file, 'w') as f:
+                json.dump(self.metadata_cache, f)
+        except Exception as e:
+            print(f"MediaManager: Failed to save metadata cache: {e}")
+
     def probe_hardware(self):
         """Probes for FFmpeg hardware encoders once and caches the result."""
+        hw_enabled = app_config.get_setting("hardware_acceleration_enabled", True)
+        if not hw_enabled:
+            print("MediaManager: Hardware acceleration disabled by user. Falling back to CPU.")
+            self.hw_encoder = None
+            return
+
         try:
             kwargs = {}
             if os.name == 'nt':
@@ -328,7 +356,11 @@ class MediaManager:
         if not CV2_AVAILABLE:
             return None
         if file_path not in self._captures:
-            self._captures[file_path] = cv2.VideoCapture(file_path)
+            # Explicitly force CAP_FFMPEG and CAP_DSHOW to prevent windowed backends like MSMF
+            # On Windows, DirectShow and FFmpeg are silent, while MSMF can spawn console windows.
+            self._captures[file_path] = cv2.VideoCapture(file_path, cv2.CAP_FFMPEG)
+            if not self._captures[file_path].isOpened():
+                self._captures[file_path] = cv2.VideoCapture(file_path, cv2.CAP_DSHOW)
         return self._captures[file_path]
 
     def get_frame(self, file_path, time_sec):
@@ -361,6 +393,12 @@ class MediaManager:
     def process_file(self, file_path):
         if not os.path.exists(file_path):
             return None
+            
+        # 1. Check Cache First
+        mtime = os.path.getmtime(file_path)
+        cache_key = f"{file_path}_{mtime}"
+        if cache_key in self.metadata_cache:
+            return self.metadata_cache[cache_key]
             
         ext = os.path.splitext(file_path)[1].lower()
         
@@ -429,7 +467,8 @@ class MediaManager:
                 except Exception:
                     pass
 
-        return {
+        # 4. Finalize and Cache
+        result = {
             "path": file_path,
             "name": os.path.basename(file_path),
             "type": media_type,
@@ -437,6 +476,10 @@ class MediaManager:
             "thumbnail": thumb_path,
             "duration": duration_sec,  # seconds, 0.0 if unknown
         }
+        
+        self.metadata_cache[cache_key] = result
+        self._save_metadata_cache()
+        return result
 
     def start_proxy_generation(self, file_path, on_progress_callback, on_finish_callback, on_fail_callback=None):
         """Pushes a heavy video proxy request into the queue."""

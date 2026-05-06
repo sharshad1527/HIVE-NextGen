@@ -1,6 +1,11 @@
 # main.py
 import sys
 import os
+
+# SILENCE OPENCV POPUPS: Prefer FFmpeg/DirectShow over MSMF which spawns windows
+os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
+os.environ["OPENCV_FFMPEG_THREADS"] = "1"
+
 import ctypes
 import random
 from datetime import datetime
@@ -15,8 +20,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize
 
-from ui.main_window import MainWindow
-from ui.project_hub import ProjectHubWindow
+# Core imports (Lightweight)
 from core.project_manager import project_manager
 from core.app_config import app_config
 from core.font_manager import font_manager
@@ -28,33 +32,51 @@ class StartupWorker(QThread):
     """
     Background worker that executes heavy initialization tasks to keep 
     the boot sequence responsive and the splash screen fluid.
-"""
+    """
     progress_update = Signal(int, str)
     finished_successfully = Signal()
 
     def run(self):
         try:
-            # 1. Cleanup temporary project cache / bin
-            self.progress_update.emit(10, "Clearing temporary caches...")
-            app_config.cleanup_bin()
+            # 1. Initialize core config and directories
+            self.progress_update.emit(5, "Loading system configuration...")
+            app_config.initialize()
             
-            # 2. Initialize font engine and register custom fonts
-            self.progress_update.emit(40, "Loading typography engine...")
+            # 2. Setup Logging (now that logs_dir is guaranteed by app_config.initialize)
+            log_level = app_config.get_setting("logging_level", "INFO")
+            is_verbose = "--verbose" in sys.argv or log_level == "DEBUG"
+            logger_manager.setup(app_config.logs_dir, verbose=is_verbose)
+            
+            # 3. Initialize font engine and register custom fonts
+            self.progress_update.emit(25, "Loading typography engine...")
             font_manager._ensure_initialized()
             
-            # 3. Probe hardware for FFmpeg acceleration (OpenCV/FFmpeg)
-            self.progress_update.emit(70, "Probing hardware acceleration...")
+            # 4. Probe hardware for FFmpeg acceleration (OpenCV/FFmpeg)
+            self.progress_update.emit(45, "Probing hardware acceleration...")
             media_manager.probe_hardware()
             
-            # 4. Final handoff
+            # 5. Pre-cache effects and transitions
+            self.progress_update.emit(65, "Caching visual presets...")
+            from core import preset_loader
+            preset_loader.reload_all()
+            
+            # 6. MODULE PRE-WARMING: Import heavy UI modules in background
+            # This populates sys.modules cache without blocking the main thread.
+            self.progress_update.emit(80, "Pre-warming UI engine...")
+            import ui.main_window
+            import ui.project_hub
+            
+            # 7. Final handoff
             self.progress_update.emit(95, "Syncing system components...")
-            self.msleep(500) # Ensure the user sees the final state
+            self.msleep(300) 
             
             self.progress_update.emit(100, "Ready.")
             self.finished_successfully.emit()
             
         except Exception as e:
             print(f"Startup Critical Error: {e}")
+            import traceback
+            traceback.print_exc()
             self.progress_update.emit(100, "Initialization failed. Starting in safe mode...")
             self.finished_successfully.emit()
 
@@ -195,6 +217,7 @@ class AppController:
 
         self.app = QApplication(sys.argv)
         self.app.setApplicationName("H.I.V.E NextGen")
+        self.app.setProperty("controller", self)
         
         icon_path = get_asset_path("logos", "HIVE_App_Icon.ico") if os.name == "nt" else get_asset_path("logos", "HIVE_App_Icon.svg")
         self.app.setWindowIcon(QIcon(icon_path))
@@ -202,12 +225,7 @@ class AppController:
         
         self.load_stylesheet()
 
-        # Phase 1: Logging
-        log_level = app_config.get_setting("logging_level", "INFO")
-        is_verbose = "--verbose" in sys.argv or log_level == "DEBUG"
-        logger_manager.setup(app_config.logs_dir, verbose=is_verbose)
-
-        # Phase 2: Orchestration
+        # Phase 1: Orchestration
         self.splash = SplashWindow()
         self.worker = StartupWorker()
         
@@ -228,6 +246,13 @@ class AppController:
 
     def on_startup_finished(self):
         """Callback for when the background thread completes initialization."""
+        # Late import: The code is already pre-warmed in the worker thread
+        from ui.project_hub import ProjectHubWindow
+        from core.audio_mixer import audio_mixer
+        
+        # Finalize hardware initialization on the main thread
+        audio_mixer.initialize()
+        
         self.hub = ProjectHubWindow()
         
         # Connect Hub signals to File Explorer dialogs
@@ -244,10 +269,36 @@ class AppController:
         # Transitions
         self.splash.close()
         self.hub.refresh_recent_projects()
-        self.hub.show()
+        
+        # --- OS File Association / Command Line Launch ---
+        target_project = None
+        for arg in sys.argv[1:]:
+            if arg.endswith(".hive"):
+                target_project = arg
+                break
+            elif arg.endswith(".hivezip"):
+                print(f"OS LAUNCH: Importing portable project {arg}...")
+                target_project = project_manager.import_portable_project(arg, app_config.default_project_path)
+                break
+        
+        if target_project and os.path.exists(target_project):
+            if target_project.endswith(".hive"):
+                # If it's a direct .hive, just highlight it in Hub first
+                self.hub.show()
+                self.hub.highlight_project(target_project)
+                # Auto-open after a short delay so the user sees the glow
+                QTimer.singleShot(1500, lambda p=target_project: self.handle_open_project(p))
+            else:
+                self.hub.show()
+        else:
+            self.hub.show()
 
     def handle_create_project(self, project_type):
         """Automatically establishes the new project folder and file."""
+        # Save old project first if editor is active
+        if self.editor:
+            self.editor.save_current_project()
+
         base_dir = app_config.default_project_path
         os.makedirs(base_dir, exist_ok=True)
         
@@ -269,6 +320,13 @@ class AppController:
         project_manager.create_new_project(name=project_name, project_type=project_type)
         project_manager.save_project(file_path)
         
+        # Reset Editor UI if it exists
+        if self.editor:
+            self.editor.panel_timeline.tracks_canvas.clear_all()
+            self.editor.panel_player.update_duration(0.0)
+            self.editor.panel_player.update_playhead(0.0)
+            self.editor.panel_workspace.clear_media_bin()
+        
         self.launch_editor()
 
     def handle_open_project(self, file_path=""):
@@ -282,11 +340,21 @@ class AppController:
                 self.hub,
                 "Open Hive Project",
                 default_dir,
-                "Hive Project Files (*.hive)"
+                "Hive Project Files (*.hive *.hivezip)"
             )
             
         if file_path and os.path.exists(file_path):
-            success = project_manager.load_project(file_path)
+            if file_path.endswith('.hivezip'):
+                from core.app_config import app_config
+                extract_root = str(app_config.default_project_path)
+                hive_file = project_manager.import_portable_project(file_path, extract_root)
+                if hive_file:
+                    success = project_manager.load_project(hive_file)
+                else:
+                    success = False
+            else:
+                success = project_manager.load_project(file_path)
+                
             if success:
                 self.launch_editor()
             else:
@@ -297,6 +365,7 @@ class AppController:
         self.hub.hide()
         
         if not self.editor:
+            from ui.main_window import MainWindow
             self.editor = MainWindow()
             original_editor_close = self.editor.closeEvent
             def _on_editor_close(event):

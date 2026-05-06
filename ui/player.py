@@ -15,7 +15,8 @@ from core.signal_hub import global_signals
 from core.project_manager import project_manager
 from core.render_engine import RenderEngine
 from core.app_config import app_config
-from core.audio_mixer import AudioMixer, AudioTrack
+from core.audio_mixer import audio_mixer, AudioTrack
+
 
 class TimelinePreviewCanvas(QWidget):
     """Custom drawing surface for the RenderEngine frames with interactive clip manipulation."""
@@ -254,7 +255,8 @@ class TimelinePreviewCanvas(QWidget):
                 continue
             for clip in reversed(track.clips):
                 start = clip.start_time / 10.0
-                end = start + (clip.duration / 10.0)
+                duration = (clip.end_time - clip.start_time) / 10.0
+                end = start + duration
                 if start <= self.current_time < end:
                     visible.append(clip)
         return visible
@@ -544,7 +546,7 @@ class PlayerPanel(QFrame):
         self._preview_aspect = (16, 9)
 
         # self.audio_players = {}
-        self.audio_mixer = AudioMixer()
+        self.audio_mixer = audio_mixer
 
         self.play_timer = QTimer(self)
         self.play_timer.setTimerType(Qt.PreciseTimer)
@@ -596,6 +598,8 @@ class PlayerPanel(QFrame):
         
         if hasattr(global_signals, 'clip_transform_changed'):
             global_signals.clip_transform_changed.connect(self._on_property_changed_rerender)
+        
+        global_signals.project_loaded.connect(self.reset_player)
             
         if hasattr(global_signals, 'force_refresh'):
             global_signals.force_refresh.connect(self._force_refresh_render)
@@ -1138,7 +1142,11 @@ class PlayerPanel(QFrame):
         if not self.is_preview_mode:
             self._update_timecode_label()
         
-    def update_playhead(self, playhead_logical):
+    def update_playhead(self, playhead_logical, user_initiated=False):
+        """Called when the timeline tells us the head moved."""
+        if user_initiated and self.is_playing:
+            self.toggle_play()
+
         if self.is_preview_mode:
             self.is_preview_mode = False
             self.is_timeline_preview = False
@@ -1176,6 +1184,29 @@ class PlayerPanel(QFrame):
                 self.scrubber.blockSignals(True)
                 self.scrubber.setValue(perc)
                 self.scrubber.blockSignals(False)
+
+    def reset_player(self):
+        """Clears all state and prepares for a new project."""
+        self.is_playing = False
+        self.play_timer.stop()
+        self.playhead = 0.0
+        self.duration = 0.0
+        self.is_preview_mode = False
+        self.is_timeline_preview = False
+        
+        # Clear hardware
+        self.player.stop()
+        self.audio_mixer.clear_tracks()
+        if hasattr(self.render_engine, 'clear_cache'):
+            self.render_engine.clear_cache() 
+        
+        # Clear UI
+        self.timeline_canvas.set_frame(None)
+        self._update_timecode_label()
+        self.scrubber.setValue(0)
+        self.btn_play.setIcon(qta.icon('mdi6.play', color='#e66b2c'))
+        
+        print("PlayerPanel: Reset for new project.")
 
     def _update_timecode_label(self, preview=False):
         def format_time(val, is_ms=False):

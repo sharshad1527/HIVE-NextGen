@@ -60,7 +60,11 @@ class FrameFetchWorker(QRunnable):
                 # 2. Fallback to OpenCV if FFmpeg fails or isn't available
                 if CV2_AVAILABLE:
                     import cv2
-                    cap = cv2.VideoCapture(self.file_path)
+                    # Force silent backends to prevent console window flicker
+                    cap = cv2.VideoCapture(self.file_path, cv2.CAP_FFMPEG)
+                    if not cap.isOpened():
+                        cap = cv2.VideoCapture(self.file_path, cv2.CAP_DSHOW)
+                        
                     if cap.isOpened():
                         # Try POS_MSEC first, it's faster if the container supports it
                         cap.set(cv2.CAP_PROP_POS_MSEC, self.time_ms)

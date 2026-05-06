@@ -952,11 +952,27 @@ class WorkspacePanel(QFrame):
 
     def _process_media_files_async(self, file_paths, copy_enabled=False, dest_dir=None, parent_folder=None, suppress_signals=False):
         if not file_paths: return
+        
+        # Filter out duplicates before starting thread to prevent redundant "loading" states
+        existing_paths = {c.file_path for c in self.all_media_cards}
+        filtered_paths = []
+        for item in file_paths:
+            p = item[0] if isinstance(item, tuple) else item
+            if p.replace('\\', '/') not in existing_paths:
+                filtered_paths.append(item)
+        
+        if not filtered_paths:
+            if not suppress_signals:
+                self.media_load_finished.emit()
+            elif self._pending_batches > 0:
+                self._on_import_batch_finished()
+            return
+            
         if not suppress_signals:
             self._pending_batches = 1
             self.media_load_started.emit()
         
-        thread = MediaLoaderThread(file_paths, copy_enabled, dest_dir, parent_folder)
+        thread = MediaLoaderThread(filtered_paths, copy_enabled, dest_dir, parent_folder)
         self.active_threads.add(thread)
         
         thread.item_processed.connect(self._add_media_card_to_grid)

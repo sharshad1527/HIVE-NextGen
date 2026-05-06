@@ -8,9 +8,9 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QPushButton, QLabel, QFrame, QGridLayout, QLineEdit, 
                                QSpacerItem, QSizePolicy, QToolButton, QButtonGroup,
                                QStackedWidget, QScrollArea)
-from PySide6.QtCore import Qt, QPoint, Signal, QSize
+from PySide6.QtCore import Qt, QPoint, Signal, QSize, QPropertyAnimation, QEasingCurve, QTimer
 from PySide6.QtGui import QPainter, QColor, QRadialGradient, QImage, QPixmap
-from PySide6.QtWidgets import QInputDialog, QMessageBox
+from PySide6.QtWidgets import QInputDialog, QMessageBox, QGraphicsDropShadowEffect
 from PySide6.QtGui import QPixmap
 
 from core.project_manager import project_manager
@@ -69,26 +69,31 @@ class HubSidebar(QWidget):
         spacer = QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding)
         sidebar_layout.addItem(spacer)
 
-        self.btn_settings = self._create_icon_button("mdi6.cog-outline", "Settings")
+        self.btn_settings = self._create_icon_button("mdi6.cog-outline", "Settings", is_tab=False)
         sidebar_layout.addWidget(self.btn_settings, 0, Qt.AlignHCenter)
         layout.addWidget(self.sidebar_box)
 
-    def _create_icon_button(self, icon_name, text, checked=False):
+    def _create_icon_button(self, icon_name, text, checked=False, is_tab=True):
         btn = QToolButton() 
         btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
         btn.setText(text)
         btn.setIcon(qta.icon(icon_name, color='#808080', color_active='#e66b2c'))
         btn.setIconSize(QSize(22, 22))
-        btn.setCheckable(True)
-        btn.setChecked(checked)
+        
+        if is_tab:
+            btn.setCheckable(True)
+            btn.setChecked(checked)
+            self.btn_group.addButton(btn)
+        else:
+            btn.setCheckable(False)
+            
         btn.setCursor(Qt.PointingHandCursor)
         btn.setFixedSize(70, 60)
         btn.setStyleSheet("""
             QToolButton { background-color: transparent; border: 1px solid transparent; border-radius: 8px; color: #808080; font-size: 10px; font-weight: 600; padding-top: 6px; padding-bottom: 4px; }
             QToolButton:hover { background-color: rgba(255, 255, 255, 0.05); color: #ffffff; }
-            QToolButton:checked { background-color: rgba(230, 107, 44, 0.1); border: 1px solid rgba(230, 107, 44, 0.3); color: #e66b2c; }
+            QToolButton:checked, QToolButton[active_dialog="true"] { background-color: rgba(230, 107, 44, 0.1); border: 1px solid rgba(230, 107, 44, 0.3); color: #e66b2c; }
         """)
-        self.btn_group.addButton(btn)
         return btn
 
     def open_trash_bin(self):
@@ -159,7 +164,40 @@ class ProjectHubWindow(QMainWindow):
         self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowSystemMenuHint)
         self.resize(1150, 720) # Increased size to prevent scrollbars and accommodate cards easily
         self._generate_premium_background_texture()
+        self.recent_cards = {} # path -> card_widget
         self.setup_ui()
+
+    def highlight_project(self, file_path):
+        """Triggers a pulsing orange glow on a specific project card."""
+        norm_path = file_path.replace('\\', '/')
+        if norm_path not in self.recent_cards:
+            self.refresh_recent_projects()
+            
+        if norm_path in self.recent_cards:
+            card = self.recent_cards[norm_path]
+            
+            # 1. Setup Shadow Effect
+            shadow = QGraphicsDropShadowEffect(card)
+            shadow.setBlurRadius(0)
+            shadow.setColor(QColor("#e66b2c"))
+            shadow.setOffset(0, 0)
+            card.setGraphicsEffect(shadow)
+            
+            # 2. Setup Animation
+            anim = QPropertyAnimation(shadow, b"blurRadius")
+            anim.setDuration(800)
+            anim.setStartValue(0)
+            anim.setKeyValueAt(0.5, 30)
+            anim.setEndValue(0)
+            anim.setLoopCount(3) # Pulse 3 times
+            anim.setEasingCurve(QEasingCurve.InOutQuad)
+            
+            # Ensure shadow is removed after animation
+            anim.finished.connect(lambda: card.setGraphicsEffect(None))
+            anim.start()
+            
+            # Scroll to the card if needed
+            self.scroll_area.ensureWidgetVisible(card)
 
     def _generate_premium_background_texture(self):
         size = 128
@@ -365,7 +403,8 @@ class ProjectHubWindow(QMainWindow):
             item = self.grid_layout.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-                
+        
+        self.recent_cards = {}
         recents = app_config.get_recent_projects()
         
         if not recents:
@@ -378,6 +417,10 @@ class ProjectHubWindow(QMainWindow):
         for data in recents: # Loop dynamically through all
             card = self._create_recent_card(data["name"], data["date"], data.get("duration", "00:00:00:00"), data["path"])
             self.grid_layout.addWidget(card, row, col)
+            
+            norm_path = data["path"].replace('\\', '/')
+            self.recent_cards[norm_path] = card
+            
             col += 1
             if col > 3:
                 col = 0

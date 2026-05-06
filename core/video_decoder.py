@@ -42,6 +42,13 @@ class VideoDecoder(QThread):
         # Initialize Cache (Shared memory budget from config)
         mem_mb = app_config.get_setting("playback_memory_limit", 1024)
         self.frame_cache = FrameCache(mem_mb * 1024 * 1024)
+        
+        # Listen for dynamic memory changes
+        global_signals.memory_limit_changed.connect(self._on_memory_limit_changed)
+
+    def _on_memory_limit_changed(self, new_limit_mb):
+        if hasattr(self, 'frame_cache') and self.frame_cache:
+            self.frame_cache.update_limit(new_limit_mb * 1024 * 1024)
 
     def set_scale(self, scale):
         """Updates the render scale for future decodes. Affects cache keys."""
@@ -74,7 +81,7 @@ class VideoDecoder(QThread):
         try:
             # Hardware Acceleration Detection
             options = {'threads': 'auto'}
-            hw_config = app_config.get_setting("hw_accel_enabled", True)
+            hw_config = app_config.get_setting("hardware_acceleration_enabled", True)
             
             if hw_config:
                 system = platform.system()

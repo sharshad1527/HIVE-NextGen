@@ -86,7 +86,7 @@ class RenderEngine(QThread):
             if playing or force:
                 result = self._composite_frame(current_logical)
                 if result:
-                    frame, active_ids, pending = result
+                    frame, active_file_paths, pending = result
                     self.frame_ready.emit(frame)
                     
                     if playing:
@@ -100,7 +100,7 @@ class RenderEngine(QThread):
                         with QMutexLocker(self.mutex):
                             self._force_render = True
                             
-                    stale = [k for k in list(self.video_readers.keys()) if k not in active_ids]
+                    stale = [k for k in list(self.video_readers.keys()) if k not in active_file_paths]
                     for k in stale:
                         self.video_readers[k]["decoder"].stop()
                         del self.video_readers[k]
@@ -130,12 +130,15 @@ class RenderEngine(QThread):
         file_path = clip.file_path
         if clip.clip_type == "video" and app_config.get_setting("auto_proxies", True):
             if clip.proxy_path and os.path.exists(clip.proxy_path): file_path = clip.proxy_path
-        if not os.path.exists(file_path): return False
+        if not os.path.exists(file_path): return False, None
 
         qimg = None
         pending_seek = False
         if clip.clip_type == "video":
-            reader_key = clip.clip_id 
+            # SHARED RESOURCE OPTIMIZATION: Use file_path as key instead of clip_id.
+            # This ensures that multiple clips referencing the same file share a single 
+            # VideoDecoder and its 1GB FrameCache, drastically reducing memory usage.
+            reader_key = file_path 
             if reader_key not in self.video_readers:
                 decoder = VideoDecoder(file_path)
                 decoder.set_scale(self._render_scale)
@@ -226,7 +229,7 @@ class RenderEngine(QThread):
             painter.drawImage(QRectF(-dw/2, -dh/2, dw, dh), qimg, source_rect)
             painter.restore()
             
-        return pending_seek
+        return pending_seek, file_path
 
     def _composite_frame(self, logical_time):
         if not CV2_AVAILABLE: return self._create_error_frame("OpenCV Missing"), set(), False
@@ -239,19 +242,19 @@ class RenderEngine(QThread):
         painter.setRenderHint(QPainter.Antialiasing, self._render_scale >= 1.0)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, self._render_scale >= 1.0)
         painter.scale(self._render_scale, self._render_scale)
-        current_ms, active_ids, total_pending = int(logical_time * 10), set(), False
+        current_ms, active_file_paths, total_pending = int(logical_time * 10), set(), False
         for track in reversed(project.tracks):
             if track.is_hidden: continue
             for original in track.clips:
                 clip = self._get_effective_clip(original)
                 if clip.start_time <= current_ms < clip.end_time:
-                    active_ids.add(clip.clip_id)
                     if clip.clip_type in ["video", "image"]: 
-                        pending = self._draw_media(painter, clip, current_ms, proj_w, proj_h)
+                        pending, active_path = self._draw_media(painter, clip, current_ms, proj_w, proj_h)
                         if pending: total_pending = True
+                        if active_path and clip.clip_type == "video": active_file_paths.add(active_path)
                     elif clip.clip_type == "caption": self._draw_caption(painter, clip, current_ms, proj_w, proj_h)
         painter.end()
-        return canvas, active_ids, total_pending
+        return canvas, active_file_paths, total_pending
 
     def _apply_cv_effects(self, frame, clip, current_ms=0, has_alpha=False):
         if not isinstance(clip.applied_effects, dict): return frame

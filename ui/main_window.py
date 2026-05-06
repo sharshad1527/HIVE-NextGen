@@ -3,7 +3,8 @@ import qtawesome as qta
 import random
 import os
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
-                               QPushButton, QLabel, QSplitter, QFrame, QGridLayout, QDialog, QApplication)
+                               QPushButton, QLabel, QSplitter, QFrame, QGridLayout, 
+                               QDialog, QApplication, QInputDialog, QLineEdit, QFileDialog, QMessageBox)
 from PySide6.QtCore import Qt, QPoint, QTimer
 from PySide6.QtGui import QPainter, QColor, QRadialGradient, QImage, QPixmap
 
@@ -99,6 +100,7 @@ class CustomTitleBar(QFrame):
         layout.setColumnStretch(2, 1)
         
         global_signals.project_loaded.connect(self.update_title)
+        global_signals.project_renamed.connect(self.update_title)
 
         if project_manager.current_project:
             self.update_title(project_manager.current_project)
@@ -113,9 +115,11 @@ class CustomTitleBar(QFrame):
             self.lbl_save_text.setText("Saving...")
             self.lbl_save_text.setStyleSheet("color: #e66b2c; font-size: 11px; font-weight: bold;")
         
-    def update_title(self, project_data):
-        if project_data:
-            self.lbl_title.setText(f"H.I.V.E - {project_data.name}")
+    def update_title(self, project_data_or_name):
+        if isinstance(project_data_or_name, str):
+            self.lbl_title.setText(f"H.I.V.E - {project_data_or_name}")
+        elif project_data_or_name:
+            self.lbl_title.setText(f"H.I.V.E - {project_data_or_name.name}")
 
     def toggle_fullscreen(self):
         if self.parent_window.isFullScreen():
@@ -262,34 +266,44 @@ class MainWindow(QMainWindow):
 
     def setup_autosave(self):
         self.is_dirty = False
-        
-        self.auto_save_timer = QTimer(self)
-        self.auto_save_timer.timeout.connect(self.auto_save_project)
-        
-        interval_mins = app_config.get_setting("auto_save_interval", 5)
-        self.auto_save_timer.start(interval_mins * 60 * 1000)
-        
-        self.panel_timeline.tracks_canvas.state_changed.connect(self.mark_unsaved)
 
-    def mark_unsaved(self):
+        # --- Continuous/Reactive Save Setup ---
+        self.reactive_save_timer = QTimer(self)
+        self.reactive_save_timer.setSingleShot(True)
+        self.reactive_save_timer.timeout.connect(self.save_current_project)
+
+        # Connect signals that should trigger a reactive save
+        self.panel_timeline.tracks_canvas.state_changed.connect(self.trigger_reactive_save)
+        global_signals.clip_updated.connect(self.trigger_reactive_save)
+        global_signals.project_resolution_changed.connect(self.trigger_reactive_save)
+        global_signals.project_renamed.connect(self.trigger_reactive_save)
+
+        # --- Periodic Backup Timer (5 mins) ---
+        self.backup_timer = QTimer(self)
+        self.backup_timer.timeout.connect(self.auto_save_project)
+        interval_mins = app_config.get_setting("auto_save_interval", 5)
+        self.backup_timer.start(interval_mins * 60 * 1000)
+
+    def trigger_reactive_save(self):
+        """Triggers a 1.5s debounced save to the main .hive file."""
+        if not project_manager.current_project:
+            return
+
         if not self.is_dirty:
             self.is_dirty = True
             self.title_bar.set_saved_state(False)
-            
-        if not hasattr(self, '_debounce_timer'):
-            self._debounce_timer = QTimer(self)
-            self._debounce_timer.setSingleShot(True)
-            self._debounce_timer.timeout.connect(self._debounced_save)
-        self._debounce_timer.start(3000) 
 
-    def _debounced_save(self):
-        if self.is_dirty and app_config.get_setting("auto_save_enabled", True):
-            self.save_current_project()
+        self.reactive_save_timer.start(1500) # 1.5s debounce
 
     def auto_save_project(self):
-        if self.is_dirty and app_config.get_setting("auto_save_enabled", True):
-            print("Auto-Saving in background...")
-            self.save_current_project()
+        """Periodic background task that creates a timestamped backup."""
+        if project_manager.current_project:
+            duration_str = self.panel_timeline.tracks_canvas.get_formatted_duration()
+            project_manager.save_project(duration_str=duration_str, is_autosave=True)
+
+    def mark_unsaved(self):
+        """Legacy helper kept for external signal compatibility."""
+        self.trigger_reactive_save()
 
     def setup_shortcuts(self):
         self.shortcut_manager = ShortcutManager(self)
@@ -316,14 +330,75 @@ class MainWindow(QMainWindow):
         self.shortcut_manager.sig_zoom_in.connect(self.panel_timeline.btn_zoom_in.click)
         self.shortcut_manager.sig_zoom_out.connect(self.panel_timeline.btn_zoom_out.click)
         self.sidebar.btn_settings.clicked.connect(self.open_settings)
+        
+        # Connect New Sidebar Project Menu Signals
+        from core.signal_hub import global_signals # Ensure accessible
+        self.sidebar.project_hub_requested.connect(lambda: QApplication.instance().activeWindow().close() if hasattr(self, 'parent_window') else self.close())
+        self.sidebar.new_project_requested.connect(lambda: QApplication.instance().property("controller").handle_create_project("standard"))
+        self.sidebar.rename_project_requested.connect(self.rename_project)
+        self.sidebar.export_portable_requested.connect(self.export_portable_project)
 
     def open_settings(self):
         dialog = SettingsDialog(self)
         dialog.exec()
         self.sidebar.clear_selection() 
         interval_mins = app_config.get_setting("auto_save_interval", 5)
-        self.auto_save_timer.setInterval(interval_mins * 60 * 1000)
+        self.backup_timer.setInterval(interval_mins * 60 * 1000)
         
+    def rename_project(self):
+        if not project_manager.current_project: return
+        
+        # Visual feedback: Highlight Project button
+        self.sidebar.btn_project.setProperty("active_dialog", True)
+        self.sidebar.btn_project.style().unpolish(self.sidebar.btn_project)
+        self.sidebar.btn_project.style().polish(self.sidebar.btn_project)
+        
+        old_name = project_manager.current_project.name
+        new_name, ok = QInputDialog.getText(
+            self, "Rename Project", "Enter new project name:",
+            QLineEdit.Normal, old_name
+        )
+        
+        # Turn off highlight
+        self.sidebar.btn_project.setProperty("active_dialog", False)
+        self.sidebar.btn_project.style().unpolish(self.sidebar.btn_project)
+        self.sidebar.btn_project.style().polish(self.sidebar.btn_project)
+        
+        if ok and new_name and new_name != old_name:
+            if project_manager.rename_project(project_manager.project_path, new_name):
+                self.title_bar.update_title(project_manager.current_project)
+                
+    def export_portable_project(self):
+        """Bundles the project and all used media into a .hivezip archive."""
+        if not project_manager.current_project: return
+        
+        default_name = f"{project_manager.current_project.name}.hivezip"
+        default_dir = os.path.expanduser("~/Desktop")
+        
+        target_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Portable Project",
+            os.path.join(default_dir, default_name),
+            "Hive Portable Project (*.hivezip)"
+        )
+        
+        if target_path:
+            if not target_path.endswith(".hivezip"):
+                target_path += ".hivezip"
+                
+            self.on_media_load_started() # Reuse the loading dialog
+            
+            # Use a tiny timer to let the UI update
+            def do_export():
+                success = project_manager.export_portable_project(target_path)
+                self.on_media_load_finished()
+                
+                if success:
+                    QMessageBox.information(self, "Export Complete", f"Successfully exported project to:\n{target_path}")
+                else:
+                    QMessageBox.critical(self, "Export Failed", "An error occurred while creating the portable archive. Check the logs for details.")
+
+            QTimer.singleShot(100, do_export)
+
     def save_current_project(self):
         self.panel_timeline.tracks_canvas.sync_to_project()
         duration_str = self.panel_timeline.tracks_canvas.get_formatted_duration()
@@ -366,6 +441,5 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(250, check_close)
 
     def closeEvent(self, event):
-        print("Safeguard: Executing final save before closing...")
         self.save_current_project()
         event.accept()

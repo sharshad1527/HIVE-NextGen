@@ -143,7 +143,7 @@ class TracksCanvas(QWidget):
     zoom_requested = Signal(int)
     tracks_changed = Signal()
     v1_duration_changed = Signal(float)
-    playhead_changed = Signal(float)
+    playhead_changed = Signal(float, bool)
     state_changed = Signal() 
 
     def __init__(self, parent=None):
@@ -324,24 +324,37 @@ class TracksCanvas(QWidget):
 
     def get_formatted_duration(self):
         """Calculates total sequence duration and returns an HH:MM:SS:FF string for Hub syncing."""
+        if not self.items:
+            return "00:00:00:00"
 
-        duration_logical = self.get_v1_duration()
+        duration_logical = max([i["x"] + i["w"] for i in self.items])
         total_seconds = int(duration_logical // 100)
         frames = int((duration_logical % 100) / 100 * 30)
-        
+
         hours = total_seconds // 3600
         mins = (total_seconds % 3600) // 60
         secs = total_seconds % 60
-        
-        return f"{hours:02d}:{mins:02d}:{secs:02d}:{frames:02d}"
 
-    def load_from_project(self, project: ProjectData):
+        return f"{hours:02d}:{mins:02d}:{secs:02d}:{frames:02d}"
+    def clear_all(self):
+        """Wipes the timeline completely for a new project."""
+        self.items = []
+        self.selected_ids = set()
+        self.logical_playhead = 0.0
+        self.max_logical_width = 0
+        self._initialized = False
+        self.update()
+        self.v1_duration_changed.emit(0.0)
+        print("Timeline: Canvas cleared.")
+
+    def load_from_project(self, project_data: ProjectData):
+
         """Translates backend ProjectData into UI timeline clips."""
 
         self.items.clear()
         
-        if project and project.tracks:
-            for track in project.tracks:
+        if project_data and project_data.tracks:
+            for track in project_data.tracks:
                 for clip in track.clips:
                     ui_x = clip.start_time / 10.0
                     ui_w = (clip.end_time - clip.start_time) / 10.0
@@ -411,7 +424,7 @@ class TracksCanvas(QWidget):
                     if "text" not in metadata:
                         metadata["text"] = item.get("text", "New Caption")
                 
-                # FIX: Re-use the live ClipData object to prevent orphaned property panel links!
+                # Re-use the live ClipData object to prevent orphaned property panel links!
                 old_clip = self._get_backend_clip(item["id"])
                 if old_clip:
                     old_clip.clip_type = item["type"]
@@ -1180,9 +1193,9 @@ class TracksCanvas(QWidget):
             duration = max([i["x"] + i["w"] for i in v1_items])
         self.v1_duration_changed.emit(float(duration))
 
-    def set_playhead(self, logical_x):
+    def set_playhead(self, logical_x, user_initiated=False):
         self.logical_playhead = float(logical_x)
-        self.playhead_changed.emit(self.logical_playhead)
+        self.playhead_changed.emit(self.logical_playhead, user_initiated)
         self.update()
 
     def delete_selected_item(self):
@@ -1562,7 +1575,7 @@ class TracksCanvas(QWidget):
 
             if self.v_scroll_y <= y <= self.v_scroll_y + 32:
                 self.selected_ids.clear()
-                self.set_playhead(max(0, logical_x))
+                self.set_playhead(max(0, logical_x), user_initiated=True)
                 self._potential_action = "drag"
                 self._potential_item = "playhead"
                 self._emit_selection_state()
@@ -1851,7 +1864,7 @@ class TracksCanvas(QWidget):
             return
         
         if self.dragging_item == "playhead":
-            self.set_playhead(logical_x)
+            self.set_playhead(logical_x, user_initiated=True)
             return
 
         item = next((i for i in self.items if i["id"] == (self.dragging_item or self.resizing_item)), None)

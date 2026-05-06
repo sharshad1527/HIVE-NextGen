@@ -103,7 +103,13 @@ class AudioMixer:
         # Timeline Time Tracking
         self.is_playing = False
         self.current_frame = 0 
-        
+        self.stream = None
+
+    def initialize(self):
+        """Starts the audio output stream. Deferring this prevents blocking during startup."""
+        if self.stream is not None:
+            return
+
         self.stream = sd.OutputStream(
             samplerate=self.sample_rate,
             channels=self.channels,
@@ -204,7 +210,7 @@ class AudioMixer:
     def add_track(self, track):
         """Registers a newly created AudioTrack to the timeline."""
         with self.tracks_lock:
-            # FIX: Insert into the dictionary properly using the clip_id
+            # Insert into the dictionary properly using the clip_id
             self.tracks[track.clip_id] = track
         hive_logger.debug(f"Added track: {track.clip_id}")
 
@@ -236,7 +242,7 @@ class AudioMixer:
         if self.is_playing:
             current_ms = (self.current_frame / self.sample_rate) * 1000.0
 
-            # FIX: Lock the thread and use .values() properly
+            # Lock the thread and use .values() properly
             with self.tracks_lock:
                 for track in self.tracks.values():
                     if track.is_active_at(current_ms):
@@ -266,6 +272,9 @@ class AudioMixer:
         outdata[:] = mixed_chunk
 
     def play(self):
+        if self.stream is None:
+            hive_logger.warning("AudioMixer: Cannot play, stream not initialized.")
+            return
         self.is_playing = True
         if not self.stream.active:
             self.stream.start()
@@ -275,6 +284,13 @@ class AudioMixer:
 
     def close(self):
         self.is_playing = False
-        self.stream.stop()
-        self.stream.close()
+        if self.stream is not None:
+            try:
+                self.stream.stop()
+                self.stream.close()
+            except Exception:
+                pass
         self.clear_tracks()
+
+# Global instance
+audio_mixer = AudioMixer()

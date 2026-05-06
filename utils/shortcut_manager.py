@@ -203,7 +203,20 @@ class ShortcutManager(QObject):
         self._active_qshortcuts.append(bs_shortcut)
 
     def show_editor(self):
+        sidebar = None
+        if hasattr(self.parent_window, "sidebar"):
+            sidebar = self.parent_window.sidebar
+            if hasattr(sidebar, "btn_shortcuts"):
+                sidebar.btn_shortcuts.setProperty("active_dialog", True)
+                sidebar.btn_shortcuts.style().unpolish(sidebar.btn_shortcuts)
+                sidebar.btn_shortcuts.style().polish(sidebar.btn_shortcuts)
+
         dialog = ShortcutEditorDialog(self.shortcuts_config, self.parent_window)
         if dialog.exec() == QDialog.Accepted:
             self.shortcuts_config = dialog.current_shortcuts
             self.apply_shortcuts()
+
+        if sidebar and hasattr(sidebar, "btn_shortcuts"):
+            sidebar.btn_shortcuts.setProperty("active_dialog", False)
+            sidebar.btn_shortcuts.style().unpolish(sidebar.btn_shortcuts)
+            sidebar.btn_shortcuts.style().polish(sidebar.btn_shortcuts)

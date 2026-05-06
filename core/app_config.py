@@ -7,6 +7,7 @@ import time
 import platform
 from datetime import datetime
 from pathlib import Path
+from core.logger import hive_logger
 
 class AppConfig:
     """Handles global app settings, memory (Recent Projects), and caching."""
@@ -24,8 +25,17 @@ class AppConfig:
         self.proxy_cache_path = self.config_dir / "proxies" 
         self.thumbnail_cache_path = self.config_dir / "thumbnails"
         self.waveform_cache_path = self.config_dir / "waveforms"
+        self.media_metadata_cache_file = self.config_dir / "media_metadata.json" # Global metadata cache
         self.logs_dir = self.config_dir / "logs"
         
+        self.data = {"recent_projects": [], "settings": {}}
+        self.settings = {}
+
+    def initialize(self):
+        """
+        Performs the heavy lifting: directory creation, config loading, and cleanup.
+        Designed to be called from the StartupWorker thread.
+        """
         # Ensure directories exist
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.default_project_path.mkdir(parents=True, exist_ok=True)
@@ -121,8 +131,11 @@ class AppConfig:
         return val if val is not None else default_value
 
     def set_setting(self, key, value):
-        self.settings[key] = value
-        self._save()
+        old_val = self.settings.get(key)
+        if old_val != value:
+            self.settings[key] = value
+            self._save()
+            hive_logger.info(f"Setting updated: {key} = {value} (was {old_val})")
 
     def set_default_project_path(self, new_path):
         """Updates and saves the default project directory."""
