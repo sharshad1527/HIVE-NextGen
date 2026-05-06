@@ -1,177 +1,185 @@
-# core/audio_mixer.py
+# core/video_decoder.py
+import queue
+import time
 import os
-import hashlib
-import numpy as np
-import scipy.signal 
 import threading
-from pathlib import Path
-import soundfile as sf
-import sounddevice as sd
+import platform
+import av
+import numpy as np
+from PySide6.QtCore import QThread
+
+from core.frame_cache import FrameCache
+from core.app_config import app_config
+from core.signal_hub import global_signals
 from core.logger import hive_logger
 
-class AudioTrack:
-    """Represents a single audio clip mapped to specific times on the timeline."""
-    def __init__(self, clip_id, file_path, start_time_ms, end_time_ms, master_sample_rate, trim_in_ms=0.0):
-        self.clip_id = clip_id
+class VideoDecoder(QThread):
+    """
+    A high-performance, interruptible video decoding engine powered by PyAV.
+    
+    Implements a Producer-Consumer architecture with a non-blocking 'Seek Protocol'.
+    Utilizes OS-native hardware acceleration (CUDA/VideoToolbox) and a multi-scale 
+    LRU cache to provide a lag-free scrubbing experience.
+    """
+
+    def __init__(self, file_path):
+        super().__init__()
         self.file_path = file_path
-        self.audio_file = sf.SoundFile(file_path)
+        self.frame_queue = queue.Queue(maxsize=30)
         
-        # Timeline placement
-        self.start_time_ms = start_time_ms
-        self.end_time_ms = end_time_ms
-        self.trim_in_ms = trim_in_ms
+        # Sync Protocol: Unique ID (nanosecond) to interrupt stale seek requests
+        self._target_seek_id = 0
+        self._current_seek_id = 0
+        self._target_logical_pos = 0.0
         
-        # Dynamic properties
-        self.volume = 1.0  
-        self.pan = 0.0     
+        # Decoder State
+        self.container = None
+        self.video_stream = None
+        self._render_scale = 1.0
+        self._run_flag = True
+        self.mutex = threading.Lock()
         
-        # --- SAMPLE RATE HANDLING ---
-        self.master_sample_rate = master_sample_rate
-        self.native_sample_rate = self.audio_file.samplerate
-        self.channels = self.audio_file.channels
+        # Initialize Cache (Shared memory budget from config)
+        mem_mb = app_config.get_setting("playback_memory_limit", 1024)
+        self.frame_cache = FrameCache(mem_mb * 1024 * 1024)
         
-        # Flag to check if we need to mathematically stretch/squash the audio chunks
-        self.needs_resampling = (self.native_sample_rate != self.master_sample_rate)
-        
-        # Calculate the ratio (e.g., 48000 / 44100 = ~1.088)
-        self.resample_ratio = self.native_sample_rate / self.master_sample_rate
+        # Listen for dynamic memory changes
+        global_signals.memory_limit_changed.connect(self._on_memory_limit_changed)
 
-    def update_timing(self, start_time_ms, end_time_ms, trim_in_ms):
-        self.start_time_ms = start_time_ms
-        self.end_time_ms = end_time_ms
-        self.trim_in_ms = trim_in_ms
+    def _on_memory_limit_changed(self, new_limit_mb):
+        if hasattr(self, 'frame_cache') and self.frame_cache:
+            self.frame_cache.update_limit(new_limit_mb * 1024 * 1024)
 
-    def update_properties(self, volume, pan=0.0):
-        self.volume = volume
-        self.pan = pan
+    def set_scale(self, scale):
+        """Updates the render scale for future decodes. Affects cache keys."""
+        with self.mutex:
+            self._render_scale = scale
 
-    def is_active_at(self, playhead_ms):
-        """Checks if the master playhead is currently over this clip."""
-        return self.start_time_ms <= playhead_ms < self.end_time_ms
-
-    def seek_to_timeline_time(self, playhead_ms):
+    def seek_to(self, logical_pos):
         """
-        Calculates exactly where the file pointer needs to be.
-        Crucially, it calculates this based on the file's NATIVE sample rate, 
-        even though the timeline operates on the MASTER sample rate.
+        Issues a prioritized seek request.
+        Instantly invalidates current decoding via a new seek_id.
         """
-        if not self.is_active_at(playhead_ms):
-            return
+        with self.mutex:
+            self._target_logical_pos = logical_pos
+            self._target_seek_id = time.time_ns()
+            # Flush queue to make room for the new seek target frames
+            while not self.frame_queue.empty():
+                try: self.frame_queue.get_nowait()
+                except queue.Empty: break
 
-        elapsed_in_clip_ms = playhead_ms - self.start_time_ms
-        total_offset_ms = elapsed_in_clip_ms + self.trim_in_ms
-        
-        # We MUST seek using the native sample rate of the file!
-        target_frame = int((total_offset_ms / 1000.0) * self.native_sample_rate)
-        
-        self.audio_file.seek(target_frame)
+    def stop(self):
+        """Gracefully shuts down the decoder thread and releases resources."""
+        self._run_flag = False
+        self.wait()
 
-    def read_chunk(self, required_master_frames):
-        """
-        Reads a chunk of audio, resampling it on the fly if the sample rates don't match.
-        """
-        if not self.needs_resampling:
-            # Native match: Just read the exact frames requested by the mixer
-            return self.audio_file.read(required_master_frames, always_2d=True)
+    def _setup_container(self):
+        """Initializes PyAV container with hardware acceleration if available."""
+        if self.container:
+            self.container.close()
         
-        # Mismatch: We must read MORE or FEWER frames from the file, 
-        # then stretch/squash them to exactly match the required_master_frames
-        frames_to_read = int(required_master_frames * self.resample_ratio)
-        native_data = self.audio_file.read(frames_to_read, always_2d=True)
-        
-        if len(native_data) == 0:
-            return native_data
+        try:
+            # Hardware Acceleration Detection
+            options = {'threads': 'auto'}
+            hw_config = app_config.get_setting("hardware_acceleration_enabled", True)
             
-        # Use scipy to resample the audio array to perfectly fit the master mixer's request
-        resampled_data = scipy.signal.resample(native_data, required_master_frames)
-        return np.array(resampled_data, dtype=np.float32)
+            if hw_config:
+                system = platform.system()
+                if system == "Windows" or system == "Linux":
+                    options['hwaccel'] = 'cuda' # NVDEC
+                elif system == "Darwin":
+                    options['hwaccel'] = 'videotoolbox'
+            
+            self.container = av.open(self.file_path, options=options)
+            self.video_stream = self.container.streams.video[0]
+            self.video_stream.thread_type = 'AUTO'
+            
+            hive_logger.info(f"VideoDecoder: Initialized {os.path.basename(self.file_path)} (HW: {hw_config})")
+        except Exception as e:
+            hive_logger.error(f"VideoDecoder: Init failed: {e}")
+            self.container = av.open(self.file_path) # Fallback to SW
+            self.video_stream = self.container.streams.video[0]
 
-    def close(self):
-        if not self.audio_file.closed:
-            self.audio_file.close()
-
-class AudioMixer:
-    def __init__(self, sample_rate=44100, channels=2):
-        """Initializes the Master Clock and Mixer Engine."""
-        self.sample_rate = sample_rate
-        self.channels = channels
+    def run(self):
+        self._setup_container()
         
-        self.tracks = {}
-        self.tracks_lock = threading.Lock()
-        self.pending_extractions = set()
-        
-        # Timeline Time Tracking
-        self.is_playing = False
-        self.current_frame = 0 
-        self.stream = None
-
-    def initialize(self):
-        """Starts the audio output stream. Deferring this prevents blocking during startup."""
-        if self.stream is not None:
-            return
-
-        self.stream = sd.OutputStream(
-            samplerate=self.sample_rate,
-            channels=self.channels,
-            latency='high',
-            blocksize=4096,
-            callback=self._audio_callback
-        )
-        hive_logger.info(f"AudioMixer initialized (SR: {self.sample_rate}, Channels: {self.channels})")
-
-    def sync_from_project(self, project):
-        """Diffs the current timeline state and intelligently updates tracks."""
-        if not project: return
-        
-        active_clip_ids = set()
-        
-        with self.tracks_lock:
-            for track in project.tracks:
-                if getattr(track, 'is_hidden', False) or getattr(track, 'is_muted', False):
-                    continue # Ignore hidden tracks completely
+        while self._run_flag:
+            try:
+                with self.mutex:
+                    target_ms = self._target_logical_pos * 10.0
+                    active_seek_id = self._target_seek_id
+                    current_scale = self._render_scale
+                
+                # Check for new seek request
+                if active_seek_id != self._current_seek_id:
+                    self._current_seek_id = active_seek_id
+                    target_pts = int(target_ms / (float(self.video_stream.time_base) * 1000))
                     
-                for clip in track.clips:
-                    if clip.clip_type in ["audio", "video"] and clip.file_path:
-                        active_clip_ids.add(clip.clip_id)
-                        
-                        start_ms = clip.start_time
-                        end_ms = clip.end_time
-                        
-                        trim_in_ms = getattr(clip, 'trim_in', 0)
-                        fx_source_in = clip.applied_effects.get("source_in", 0) * 10
-                        final_trim_in_ms = max(trim_in_ms, fx_source_in)
-                        
-                        vol_pct = float(clip.applied_effects.get("Volume", 100)) / 100.0
-                        
-                        if clip.clip_id in self.tracks:
-                            # Update existing track directly (Trim/Move/Volume change)
-                            self.tracks[clip.clip_id].update_timing(start_ms, end_ms, final_trim_in_ms)
-                            self.tracks[clip.clip_id].update_properties(vol_pct)
-                        else:
-                            # Add newly dragged/cut clip
-                            # 1. Standardize path and hash by FILE, not clip ID
-                            normalized_path = clip.file_path.replace('\\', '/')
-                            file_hash = hashlib.md5(normalized_path.encode()).hexdigest()
-                            conformed_path = Path.home() / ".hive_editor" / "audio_cache" / f"{file_hash}_conformed.wav"
-                            target_audio_path = clip.file_path
+                    # Optimization: Check Cache first
+                    cached = self.frame_cache.get(target_pts, current_scale)
+                    if cached is not None:
+                        self.frame_queue.put((self._target_logical_pos, cached))
+                        continue # Seek fulfilled from cache
+                    
+                    # Precise Seek: Jump to keyframe then fast-forward
+                    self.container.seek(target_pts, backward=True, stream=self.video_stream)
+                    
+                    # FAST-FORWARD LOOP: Drain packets until target millisecond
+                    for frame in self.container.decode(video=0):
+                        # Interruption Check: Did a newer seek arrive during decoding?
+                        if self._target_seek_id != active_seek_id:
+                            break
                             
-                            if conformed_path.exists():
-                                target_audio_path = str(conformed_path)
-                            elif clip.clip_type == "video":
-                                # 2. SPAM GUARD: Check the FILE HASH, not the clip ID
-                                if file_hash not in self.pending_extractions:
-                                    hive_logger.info(f"Extracting audio for {clip.file_path}...")
-                                    self.pending_extractions.add(file_hash)
-                                    
-                                    from core.media_manager import media_manager
-                                    
-                                    def on_audio_ready(original_path, wav_path, f_hash=file_hash):
-                                        hive_logger.info(f"Extraction complete for {original_path}! Resyncing mixer...")
-                                        self.pending_extractions.discard(f_hash)
-                                        self.sync_from_project(project)
-                                        
-                                    def on_audio_fail(original_path, error_msg, f_hash=file_hash):
-                                        hive_logger.error(f"Extraction FAILED for {original_path}: {error_msg}")
+                        # Keep frames that are exactly at or slightly ahead of target
+                        if (frame.time * 1000) < (target_ms - 1):
+                            continue
+                            
+                        # Target reached - process and cache
+                        sw = int(frame.width * current_scale)
+                        sh = int(frame.height * current_scale)
+                        
+                        # High-speed YUV -> BGR24 conversion and Rescale
+                        image = frame.to_ndarray(format='rgba', width=sw, height=sh)
+                        
+                        self.frame_cache.put(frame.pts, image, current_scale)
+                        
+                        # Push to UI queue (Mapping time to logical timeline units)
+                        logical_out = (frame.time * 1000) / 10.0
+                        self.frame_queue.put((logical_out, image))
+                        
+                        # Only push the first matching frame for a seek, then wait for next loop
+                        break
+                        
+                else:
+                    # Normal Playback / Background Pre-roll
+                    # If queue is low, decode the next frame sequentially
+                    if self.frame_queue.qsize() < 10:
+                        try:
+                            frame = next(self.container.decode(video=0))
+                            
+                            sw = int(frame.width * current_scale)
+                            sh = int(frame.height * current_scale)
+                            image = frame.to_ndarray(format='rgba', width=sw, height=sh)
+                            
+                            self.frame_cache.put(frame.pts, image, current_scale)
+                            logical_out = (frame.time * 1000) / 10.0
+                            self.frame_queue.put((logical_out, image))
+                        except (StopIteration, av.error.FFmpegError):
+                            # Loop or wait at EOF
+                            time.sleep(0.01)
+                    else:
+                        time.sleep(0.005)
+
+            except Exception as e:
+                # Self-Healing recovery block: Prevent thread death on corrupt packets
+                hive_logger.error(f"VideoDecoder: Loop Error: {e}")
+                time.sleep(0.1)
+                self._setup_container()
+        
+        if self.container:
+            self.container.close()
+        hive_logger.info("VideoDecoder: Thread stopped.")
+l_path}: {error_msg}")
                                         self.pending_extractions.discard(f_hash)
                                         
                                     media_manager.start_audio_conform(
@@ -220,6 +228,10 @@ class AudioMixer:
             for track in self.tracks.values(): 
                 track.close()
             self.tracks.clear()
+
+    def get_current_time_ms(self):
+        """Returns the current timeline position in milliseconds, driven by the audio sample clock."""
+        return (self.current_frame / self.sample_rate) * 1000.0
 
     def seek(self, playhead_ms):
         """

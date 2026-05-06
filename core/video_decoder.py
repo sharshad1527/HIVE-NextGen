@@ -138,8 +138,8 @@ class VideoDecoder(QThread):
                         sw = int(frame.width * current_scale)
                         sh = int(frame.height * current_scale)
                         
-                        # High-speed YUV -> BGR24 conversion and Rescale
-                        image = frame.to_ndarray(format='bgr24', width=sw, height=sh)
+                        # High-speed YUV -> RGBA conversion and Rescale
+                        image = frame.to_ndarray(format='rgba', width=sw, height=sh)
                         
                         self.frame_cache.put(frame.pts, image, current_scale)
                         
@@ -159,7 +159,7 @@ class VideoDecoder(QThread):
                             
                             sw = int(frame.width * current_scale)
                             sh = int(frame.height * current_scale)
-                            image = frame.to_ndarray(format='bgr24', width=sw, height=sh)
+                            image = frame.to_ndarray(format='rgba', width=sw, height=sh)
                             
                             self.frame_cache.put(frame.pts, image, current_scale)
                             logical_out = (frame.time * 1000) / 10.0

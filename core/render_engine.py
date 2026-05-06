@@ -190,9 +190,13 @@ class RenderEngine(QThread):
             else: frame_array = reader_data["lkgf"]
 
             if frame_array is not None:
-                processed = self._apply_cv_effects(frame_array, clip, current_ms)
-                rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
-                qimg = QImage(rgb.data, rgb.shape[1], rgb.shape[0], rgb.shape[2]*rgb.shape[1], QImage.Format_RGB888).copy()
+                # Phase 3 Prep: VideoDecoder now outputs RGBA. 
+                # We convert to BGRA for legacy OpenCV effects, then back to RGBA for display.
+                bgra = cv2.cvtColor(frame_array, cv2.COLOR_RGBA2BGRA)
+                processed = self._apply_cv_effects(bgra, clip, current_ms, has_alpha=True)
+                
+                rgba = cv2.cvtColor(processed, cv2.COLOR_BGRA2RGBA)
+                qimg = QImage(rgba.data, rgba.shape[1], rgba.shape[0], rgba.shape[2]*rgba.shape[1], QImage.Format_RGBA8888).copy()
                 
         elif clip.clip_type == "image":
             img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)

@@ -1,3 +1,4 @@
+# ui/player.py
 import qtawesome as qta
 import os
 import time
@@ -959,21 +960,22 @@ class PlayerPanel(QFrame):
                 self.btn_play.setIcon(qta.icon('mdi6.play', color='#e66b2c'))
 
     def _on_play_step(self):
-        if not hasattr(self, 'playback_start_time'):
-            self.playback_start_time = time.time()
-            
-        elapsed = time.time() - self.playback_start_time
-        new_pos = self.playback_start_playhead + (elapsed * 100.0)
+        # Poll the Master Clock (Audio Mixer)
+        playhead_ms = self.audio_mixer.get_current_time_ms()
+        new_pos = playhead_ms / 10.0
         
         self.timeline_canvas.set_time(self.playhead)
         
         if self.is_timeline_preview:
+            if not hasattr(self, 'playback_start_time'):
+                self.playback_start_time = time.time()
+            elapsed = time.time() - self.playback_start_time
             duration_sec = getattr(self, 'preview_duration', 5000) / 1000.0
             if elapsed > duration_sec:
                 self.playback_start_time = time.time()
                 self.playhead = self.playback_start_playhead
             else:
-                self.playhead = new_pos
+                self.playhead = self.playback_start_playhead + (elapsed * 100.0)
                 self._update_timecode_label(preview=False)
                 self.render_engine.request_frame(int(self.playhead))
             return
