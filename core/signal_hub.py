@@ -44,6 +44,7 @@ class SignalHub(QObject):
     memory_limit_changed = Signal(int)
 
     timeline_updated = Signal()
+    auto_scroll_requested = Signal()
 
     # Logging
     log_emitted = Signal(str, str) # log_entry, levelname

@@ -28,7 +28,7 @@ class StartupWorker(QThread):
     """
     Background worker that executes heavy initialization tasks to keep 
     the boot sequence responsive and the splash screen fluid.
-    """
+"""
     progress_update = Signal(int, str)
     finished_successfully = Signal()
 

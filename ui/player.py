@@ -1001,6 +1001,10 @@ class PlayerPanel(QFrame):
                 self.btn_play.setIcon(qta.icon('mdi6.play', color='#e66b2c'))
                 if not self.is_timeline_preview:
                     self.audio_mixer.pause() 
+                
+                # Auto-Scroll on Pause
+                if hasattr(global_signals, 'auto_scroll_requested'):
+                    global_signals.auto_scroll_requested.emit()
             else:
                 if not self.is_timeline_preview and self.playhead >= self.duration and self.duration > 0:
                     self.playhead_seek_requested.emit(0)

@@ -337,6 +337,17 @@ class TimelinePanel(QFrame):
             self.tracks_scroll.horizontalScrollBar().setValue(max(0, target_scroll_x))
         QTimer.singleShot(0, adjust_scroll)
 
+    def scroll_to_playhead(self):
+        """Centers the timeline view on the current playhead position."""
+        playhead_logical = self.tracks_canvas.logical_playhead
+        zoom_factor = self.tracks_canvas.zoom_factor
+        playhead_physical_x = int(playhead_logical * zoom_factor)
+        
+        viewport_w = self.tracks_scroll.viewport().width()
+        target_scroll_x = playhead_physical_x - (viewport_w // 2)
+        
+        self.tracks_scroll.horizontalScrollBar().setValue(max(0, target_scroll_x))
+
     def _create_header(self, text, icon_name, height, is_title=False, active=False, track_id=None, locked=False, hidden=False, group=""):
         header = QWidget()
         header.setFixedHeight(height)

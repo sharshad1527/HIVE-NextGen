@@ -245,6 +245,10 @@ class MainWindow(QMainWindow):
         self.panel_workspace.media_load_started.connect(self.on_media_load_started)
         self.panel_workspace.media_load_finished.connect(self.on_media_load_finished)
 
+        # Connect UI/UX Improvements
+        if hasattr(global_signals, 'auto_scroll_requested'):
+            global_signals.auto_scroll_requested.connect(self.panel_timeline.scroll_to_playhead)
+
         initial_duration = self.panel_timeline.tracks_canvas.get_v1_duration()
         self.panel_player.update_duration(initial_duration)
         self.panel_player.update_playhead(self.panel_timeline.tracks_canvas.logical_playhead)

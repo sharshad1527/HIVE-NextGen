@@ -13,6 +13,8 @@ from core.project_manager import project_manager
 from core.app_config import app_config
 from core.models import ClipData
 from core.video_decoder import VideoDecoder
+from core.signal_hub import global_signals
+
 try:
     import cv2
     import numpy as np
@@ -22,11 +24,6 @@ except ImportError:
 
 
 class RenderEngine(QThread):
-    """
-    Background thread that composites video frames, images, and text 
-    for the timeline preview using OpenCV and QPainter.
-    Supports effects: blur, glow, vignette, color grade, VHS, and glitch.
-    """
     frame_ready = Signal(QImage)
 
     def __init__(self):
@@ -43,11 +40,9 @@ class RenderEngine(QThread):
         hive_logger.info("RenderEngine initialized.")
 
     def request_frame(self, logical_time):
-        """Called by the UI when the playhead moves (scrubbing or stepping)."""
         with QMutexLocker(self.mutex):
             self.playhead_logical = logical_time
-            if not self.is_playing:
-                self._force_render = True
+            if not self.is_playing: self._force_render = True
 
     def set_playing(self, playing):
         with QMutexLocker(self.mutex):
@@ -55,17 +50,17 @@ class RenderEngine(QThread):
             hive_logger.info(f"Playback {'started' if playing else 'stopped'}.")
             
     def set_render_fps(self, fps):
-        with QMutexLocker(self.mutex):
-            self._target_fps = float(fps)
+        with QMutexLocker(self.mutex): self._target_fps = float(fps)
             
     def set_render_scale(self, scale):
         with QMutexLocker(self.mutex):
             self._render_scale = scale
-            if not self.is_playing:
-                self._force_render = True
+            for reader in self.video_readers.values():
+                reader["decoder"].set_scale(scale)
+                reader["lkgf"] = None
+            if not self.is_playing: self._force_render = True
                 
     def set_preview_preset(self, preset_data, target_clip_id=None):
-        """Injects a preset to be previewed directly on the canvas without altering the project."""
         with QMutexLocker(self.mutex):
             self.preview_preset = preset_data
             self.preview_target_clip_id = target_clip_id
@@ -73,36 +68,40 @@ class RenderEngine(QThread):
             self._force_render = True
 
     def _clear_readers(self):
-        for reader_data in self.video_readers.values():
-            reader_data["decoder"].stop()
+        for reader_data in self.video_readers.values(): reader_data["decoder"].stop()
         self.video_readers.clear()
 
     def stop(self):
-        hive_logger.info("Stopping RenderEngine...")
         self._run_flag = False
         self._clear_readers()
         self.wait()
-        hive_logger.info("RenderEngine stopped.")
 
     def run(self):
-        hive_logger.info("RenderEngine thread started.")
         while self._run_flag:
             start_time = time.time()
-            
             with QMutexLocker(self.mutex):
-                playing = self.is_playing
-                current_logical = self.playhead_logical
-                force = self._force_render
+                playing, current_logical, force = self.is_playing, self.playhead_logical, self._force_render
                 self._force_render = False
 
             if playing or force:
                 result = self._composite_frame(current_logical)
                 if result:
-                    frame, active_clip_ids = result
+                    frame, active_ids, pending = result
                     self.frame_ready.emit(frame)
                     
-                    stale_readers = [k for k in list(self.video_readers.keys()) if k not in active_clip_ids]
-                    for k in stale_readers:
+                    if playing:
+                        if not hasattr(self, '_frame_count'): self._frame_count = 0
+                        self._frame_count += 1
+                        if self._frame_count % 30 == 0:
+                            hive_logger.debug(f"RenderEngine: Active (Playhead: {current_logical})")
+                    
+                    # Scrub-to-Preview: If decoder is still seeking during scrub, force next render
+                    if not playing and pending:
+                        with QMutexLocker(self.mutex):
+                            self._force_render = True
+                            
+                    stale = [k for k in list(self.video_readers.keys()) if k not in active_ids]
+                    for k in stale:
                         self.video_readers[k]["decoder"].stop()
                         del self.video_readers[k]
 
@@ -110,850 +109,261 @@ class RenderEngine(QThread):
             sleep_time = max(0, (1.0 / self._target_fps) - elapsed)
             time.sleep(sleep_time if playing else 0.016)
 
-    @staticmethod
-    def _get_track_num(track_id):
-        try:
-            return int(track_id.split('_')[-1])
-        except:
-            return 0
-
-    def _get_effective_clip(self, original_clip):
-        """Temporarily injects preview preset properties into the active clip for rendering cleanly."""
-        if not getattr(self, "preview_preset", None):
-            return original_clip
-            
+    def _get_effective_clip(self, clip):
+        if not getattr(self, "preview_preset", None): return clip
         ptype = self.preview_preset.get("type")
-        if ptype not in ["effect", "transition", "caption"]:
-            return original_clip
-            
-        target_clip_id = getattr(self, "preview_target_clip_id", None)
+        if ptype not in ["effect", "transition", "caption"]: return clip
+        target_id = getattr(self, "preview_target_clip_id", None)
+        if target_id and clip.clip_id != target_id: return clip
         
-        if ptype == "transition":
-            clip = copy.copy(original_clip)
-            clip.applied_effects = copy.deepcopy(original_clip.applied_effects) if isinstance(original_clip.applied_effects, dict) else {}
-            clip.applied_effects.pop("transition_in", None)
-            clip.applied_effects.pop("transition_out", None)
-            clip.transition_in = None
-            clip.transition_out = None
-            if target_clip_id and clip.clip_id == target_clip_id:
-                pname = self.preview_preset.get("title")
-                clip.applied_effects["transition_out"] = pname
-                clip.applied_effects["transition_out_duration"] = 30
-                clip.transition_out = pname
-                clip.transition_out_duration = 30
-            return clip
-
-        if target_clip_id and original_clip.clip_id != target_clip_id:
-            return original_clip
-            
-        clip = copy.copy(original_clip)
-        clip.applied_effects = copy.deepcopy(original_clip.applied_effects) if isinstance(original_clip.applied_effects, dict) else {}
-        
+        c = copy.copy(clip)
+        c.applied_effects = copy.deepcopy(clip.applied_effects) if isinstance(clip.applied_effects, dict) else {}
         if ptype == "effect":
-            clip.applied_effects.pop("applied_effects", None)
-            clip.applied_effects.pop("primary_effect", None)
-        
-        pname = self.preview_preset.get("title")
-        props = self.preview_preset.get("preset_properties", {})
-        
-        from core.preset_loader import get_default_properties
-        defaults = get_default_properties({"properties": props})
-        
-        if ptype == "effect" and clip.clip_type in ["video", "image"]:
-            clip.applied_effects["applied_effects"] = [pname]
-            clip.applied_effects["primary_effect"] = pname
-            for k, v in defaults.items(): 
-                clip.applied_effects[k] = v
-            
-        return clip
-
-    def _composite_frame(self, logical_time):
-        if not CV2_AVAILABLE:
-            hive_logger.error("OpenCV (cv2) not available. Cannot render frame.")
-            return self._create_error_frame("OpenCV (cv2) is not installed.\nPlease install opencv-python."), set()
-
-        project = project_manager.current_project
-        if not project:
-            return None
-
-        proj_w, proj_h = project.resolution
-        
-        render_w = max(1, int(proj_w * self._render_scale))
-        render_h = max(1, int(proj_h * self._render_scale))
-        
-        canvas = QImage(render_w, render_h, QImage.Format_ARGB32)
-        canvas.fill(Qt.black)
-        
-        painter = QPainter(canvas)
-        
-        if self._render_scale < 1.0:
-            painter.setRenderHint(QPainter.Antialiasing, False)
-            painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
-        else:
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setRenderHint(QPainter.SmoothPixmapTransform)
-
-        painter.scale(self._render_scale, self._render_scale)
-
-        current_ms = int(logical_time * 10)
-
-        # Render directly from bottom to top (visual index N to 0)
-        reversed_tracks = list(reversed(project.tracks))
-
-        active_clip_ids = set()
-        is_transition_preview = getattr(self, "preview_preset", None) and self.preview_preset.get("type") == "transition"
-
-        for track in reversed_tracks:
-            if track.is_hidden: continue
-            
-            for original_clip in track.clips:
-                if is_transition_preview:
-                    target_id = getattr(self, "preview_target_clip_id", None)
-                    if target_id and original_clip.clip_id != target_id:
-                        continue
-                        
-                clip = self._get_effective_clip(original_clip)
-                if clip.start_time <= current_ms < clip.end_time:
-                    
-                    if clip.clip_type in ["video", "image"]:
-                        active_clip_ids.add(clip.clip_id)
-                        self._draw_media(painter, clip, current_ms, proj_w, proj_h)
-                        
-                    elif clip.clip_type == "effect":
-                        # Do not draw other generic effects if we are currently globally previewing one
-                        if getattr(self, "preview_preset", None) and self.preview_preset.get("type") in ["effect", "caption", "transition"]:
-                            continue
-                            
-                        active_clip_ids.add(clip.clip_id)
-                        painter.end()
-                        canvas = self._apply_track_effect(canvas, clip, render_w, render_h, current_ms)
-                        painter = QPainter(canvas)
-                        if self._render_scale < 1.0:
-                            painter.setRenderHint(QPainter.Antialiasing, False)
-                            painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
-                        else:
-                            painter.setRenderHint(QPainter.Antialiasing)
-                            painter.setRenderHint(QPainter.SmoothPixmapTransform)
-                        painter.scale(self._render_scale, self._render_scale)
-                        
-                    elif clip.clip_type == "caption":
-                        # Do not draw other generic captions if we are currently previewing one
-                        if getattr(self, "preview_preset", None) and self.preview_preset.get("type") in ["effect", "caption", "transition"]:
-                            continue
-                            
-                        active_clip_ids.add(clip.clip_id)
-                        self._draw_caption(painter, clip, current_ms, proj_w, proj_h)
-                        
-        # Global Preview Pass for Captions
-        if getattr(self, "preview_preset", None) and self.preview_preset.get("type") == "caption":
-            props = self.preview_preset.get("preset_properties", {})
+            pname = self.preview_preset.get("title")
+            c.applied_effects.update({"applied_effects": [pname], "primary_effect": pname})
             from core.preset_loader import get_default_properties
-            defaults = get_default_properties({"properties": props})
-            defaults["text"] = "Preview Caption"
-            defaults["preset_name"] = self.preview_preset.get("name", "Standard")
-            
-            start_ms = getattr(self, "preview_start_ms", current_ms)
-            fake_clip = ClipData(file_path="", start_time=int(start_ms), end_time=int(start_ms)+5000, clip_type="caption", applied_effects=defaults)
-            self._draw_caption(painter, fake_clip, current_ms, proj_w, proj_h)
-                        
-        painter.end()
-        return canvas, active_clip_ids
-
-    def _apply_track_effect(self, canvas, effect_clip, render_w, render_h, current_ms):
-        """Applies a standalone effect-track clip to the entire QImage canvas via OpenCV."""
-        if not CV2_AVAILABLE:
-            return canvas
-        
-        # Convert QImage to numpy array
-        canvas = canvas.convertToFormat(QImage.Format_ARGB32)
-        ptr = canvas.bits()
-        arr = np.frombuffer(ptr, dtype=np.uint8).reshape((render_h, render_w, 4)).copy()
-        # ARGB -> BGRA for OpenCV
-        bgr = cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
-        
-        # Apply effects using existing _apply_cv_effects pipeline
-        bgr = self._apply_cv_effects(bgr, effect_clip, current_ms)
-        
-        # Convert back to QImage
-        bgr = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        h, w, ch = bgr.shape
-        result = QImage(bgr.data, w, h, ch * w, QImage.Format_RGB888).copy()
-        return result
+            defaults = get_default_properties({"properties": self.preview_preset.get("preset_properties", {})})
+            c.applied_effects.update(defaults)
+        return c
 
     def _draw_media(self, painter, clip, current_ms, proj_w, proj_h):
         file_path = clip.file_path
-        
         if clip.clip_type == "video" and app_config.get_setting("auto_proxies", True):
-            if clip.proxy_path and os.path.exists(clip.proxy_path):
-                file_path = clip.proxy_path
-
-        if not os.path.exists(file_path):
-            return
+            if clip.proxy_path and os.path.exists(clip.proxy_path): file_path = clip.proxy_path
+        if not os.path.exists(file_path): return False
 
         qimg = None
-        
+        pending_seek = False
         if clip.clip_type == "video":
             reader_key = clip.clip_id 
-            
-            # 1. Start the Background Cook (VideoDecoder) if it doesn't exist
             if reader_key not in self.video_readers:
                 decoder = VideoDecoder(file_path)
-                decoder.start() # Start baking frames!
-                self.video_readers[reader_key] = {"decoder": decoder, "last_ms": 0}
+                decoder.set_scale(self._render_scale)
+                decoder.start() 
+                self.video_readers[reader_key] = {"decoder": decoder, "last_ms": -1.0, "lkgf": None}
             
             reader_data = self.video_readers[reader_key]
             decoder = reader_data["decoder"]
+            speed = max(0.1, (clip.applied_effects or {}).get("Speed", 100) / 100.0)
+            local_ms = ((current_ms - clip.start_time) * speed) + getattr(clip, 'trim_in', 0)
             
-            trim_in_ms = getattr(clip, 'trim_in', 0)
-            props_local = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
-            if isinstance(clip.applied_effects, dict):
-                fx_source_in = clip.applied_effects.get("source_in", 0) * 10
-                trim_in_ms = max(trim_in_ms, fx_source_in)
+            diff = abs(local_ms - reader_data["last_ms"])
+            frame_array = None
+            
+            seek_threshold = 1000 if self.is_playing else 100
+            
+            # If we are seeking or far away from current frame
+            if not self.is_playing or diff > seek_threshold:
+                target_pos = local_ms / 10.0
+                # Seek Storm Fix: Allow 50ms (500ms) drift during playback to let decoder breathe
+                seek_drift = 50.0 if self.is_playing else 0.1
                 
-            speed_pct = props_local.get("Speed", 100)
-            speed_factor = max(0.1, speed_pct / 100.0)
-            local_ms = ((current_ms - clip.start_time) * speed_factor) + trim_in_ms
-            
-            current_pos_ms = reader_data["last_ms"]
-            diff = local_ms - current_pos_ms
-            
-            ret = False
-            frame = None
-
-            # 2. Check if the user scrubbed the timeline fast
-            if diff < -70 or diff > 200:
-                decoder.seek_to(local_ms / 10.0) # Tell cook to restart at new time
+                if abs(target_pos - reader_data.get("last_seek_pos", -1)) > seek_drift:
+                    decoder.seek_to(target_pos)
+                    reader_data["last_seek_pos"] = target_pos
+                
                 try:
-                    # Wait up to 0.2 seconds for the new frame to be ready
-                    logical_pos, frame = decoder.frame_queue.get(timeout=0.2)
-                    reader_data["last_ms"] = logical_pos * 10.0
-                    ret = True
+                    # Balanced wait: 33ms (one frame at 30fps)
+                    logical_pos, f = decoder.frame_queue.get(timeout=0.033)
+                    frame_ms = logical_pos * 10.0
+                    if abs(frame_ms - local_ms) < 500: # Generous window for seeks
+                        frame_array, reader_data["last_ms"] = f, frame_ms
                 except queue.Empty:
-                    pass
+                    if not self.is_playing:
+                        pending_seek = True
             else:
-                # 3. Normal Playback: Grab frames off the warming rack instantly!
+                # Normal playback: Drain queue to catch up
                 while not decoder.frame_queue.empty():
                     try:
                         logical_pos, f = decoder.frame_queue.get_nowait()
                         frame_ms = logical_pos * 10.0
-                        reader_data["last_ms"] = frame_ms
-                        
-                        # Stop grabbing when we hit the exact frame we need
-                        if (local_ms - frame_ms) <= 50:
-                            frame = f
-                            ret = True
+                        if frame_ms >= local_ms - 33: # Approx 1 frame window at 30fps
+                            frame_array, reader_data["last_ms"] = f, frame_ms
                             break
                     except queue.Empty:
                         break
 
-            if ret and frame is not None:
-                # Apply effects and send to UI!
-                frame = self._apply_cv_effects(frame, clip, current_ms)
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                h, w, ch = frame.shape
-                bytes_per_line = ch * w
-                qimg = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
+            if frame_array is not None: reader_data["lkgf"] = frame_array
+            else: frame_array = reader_data["lkgf"]
+
+            if frame_array is not None:
+                processed = self._apply_cv_effects(frame_array, clip, current_ms)
+                rgb = cv2.cvtColor(processed, cv2.COLOR_BGR2RGB)
+                qimg = QImage(rgb.data, rgb.shape[1], rgb.shape[0], rgb.shape[2]*rgb.shape[1], QImage.Format_RGB888).copy()
                 
         elif clip.clip_type == "image":
             img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
             if img is not None:
-                # Apply pixel-level effects
                 if len(img.shape) == 3 and img.shape[2] == 4:
-                    img = self._apply_cv_effects(img, clip, current_ms, has_alpha=True)
-                    img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
-                    h, w, ch = img.shape
-                    bytes_per_line = ch * w
-                    qimg = QImage(img.data, w, h, bytes_per_line, QImage.Format_RGBA8888).copy()
+                    img = self._apply_cv_effects(img, clip, current_ms, True)
+                    qimg = QImage(cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA).data, img.shape[1], img.shape[0], 4*img.shape[1], QImage.Format_RGBA8888).copy()
                 else:
-                    if len(img.shape) == 2:
-                        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                    if len(img.shape) == 2: img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
                     img = self._apply_cv_effects(img, clip, current_ms)
-                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    h, w, ch = img.shape
-                    bytes_per_line = ch * w
-                    qimg = QImage(img.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
+                    qimg = QImage(cv2.cvtColor(img, cv2.COLOR_BGR2RGB).data, img.shape[1], img.shape[0], 3*img.shape[1], QImage.Format_RGB888).copy()
 
         if qimg and not qimg.isNull():
             props = clip.applied_effects or {}
-            
-            # --- EVALUATE KEYFRAMES DYNAMICALLY ---
             if hasattr(clip, 'get_animated_value'):
-                rel_time = max(0.0, (current_ms - clip.start_time) / 10.0)
-                scale_pct = clip.get_animated_value("Scale", rel_time, props.get("Scale", 100)) / 100.0
-                pos_x = clip.get_animated_value("Position_X", rel_time, props.get("Position_X", 0))
-                pos_y = clip.get_animated_value("Position_Y", rel_time, props.get("Position_Y", 0))
-                rotation = clip.get_animated_value("Rotation", rel_time, props.get("Rotation", 0))
-                opacity = clip.get_animated_value("Opacity", rel_time, props.get("Opacity", 100)) / 100.0
-            else:
-                scale_pct = props.get("Scale", 100) / 100.0
-                pos_x = props.get("Position_X", 0)
-                pos_y = props.get("Position_Y", 0)
-                rotation = props.get("Rotation", 0)
-                opacity = props.get("Opacity", 100) / 100.0
+                rel_t = max(0.0, (current_ms - clip.start_time) / 10.0)
+                sc, px, py, rot, op = [clip.get_animated_value(k, rel_t, props.get(k, d)) for k,d in [("Scale",100),("Position_X",0),("Position_Y",0),("Rotation",0),("Opacity",100)]]
+            else: sc, px, py, rot, op = props.get("Scale",100), props.get("Position_X",0), props.get("Position_Y",0), props.get("Rotation",0), props.get("Opacity",100)
             
-            # Transition Playback Support 
-            trans_in = props.get("transition_in")
-            if trans_in:
-                dur_frames = props.get("transition_in_duration", 30)
-                dur_ms = dur_frames * (1000.0 / 30.0)
-                elapsed_ms = current_ms - clip.start_time
-                if 0 <= elapsed_ms < dur_ms:
-                    progress = elapsed_ms / dur_ms
-                    if trans_in == "Cross Dissolve":
-                        opacity *= progress
-                    elif trans_in == "Slide":
-                        pos_x += (progress - 1.0) * proj_w
-                    elif trans_in == "Wipe":
-                        opacity *= progress  # Simple fallback wipe implementation
-                    elif trans_in == "Zoom":
-                        scale_pct *= progress
-                    elif trans_in == "Spin":
-                        rotation += (1.0 - progress) * 360
-                        scale_pct *= progress
-                    else:
-                        opacity *= progress
-                    
-            trans_out = props.get("transition_out")
-            if trans_out:
-                dur_frames = props.get("transition_out_duration", 30)
-                dur_ms = dur_frames * (1000.0 / 30.0)
-                remaining_ms = clip.end_time - current_ms
-                if 0 <= remaining_ms < dur_ms:
-                    progress = remaining_ms / dur_ms
-                    if trans_out == "Cross Dissolve":
-                        opacity *= progress
-                    elif trans_out == "Slide":
-                        pos_x += (1.0 - progress) * proj_w
-                    elif trans_out == "Wipe":
-                        opacity *= progress
-                    elif trans_out == "Zoom":
-                        scale_pct *= progress
-                    elif trans_out == "Spin":
-                        rotation += (1.0 - progress) * 360
-                        scale_pct *= progress
-                    else:
-                        opacity *= progress
-
-            crop_x = props.get("crop_x", 0) / 100.0
-            crop_y = props.get("crop_y", 0) / 100.0
-            crop_w = props.get("crop_w", 100) / 100.0
-            crop_h = props.get("crop_h", 100) / 100.0
-
-            img_w = qimg.width()
-            img_h = qimg.height()
-
-            cw = max(1.0, img_w * crop_w)
-            ch = max(1.0, img_h * crop_h)
-            cx = img_w * crop_x
-            cy = img_h * crop_y
-
-            source_rect = QRectF(cx, cy, cw, ch)
-
             painter.save()
-            painter.setOpacity(opacity)
-
-            # --- BLEND MODE (Image clips) ---
-            blend_mode = props.get("Blend_Mode", "Normal") if clip.clip_type == "image" else "Normal"
-            _blend_map = {
-                "Normal":   QPainter.CompositionMode_SourceOver,
-                "Multiply": QPainter.CompositionMode_Multiply,
-                "Screen":   QPainter.CompositionMode_Screen,
-                "Overlay":  QPainter.CompositionMode_Overlay,
-                "Darken":   QPainter.CompositionMode_Darken,
-                "Lighten":  QPainter.CompositionMode_Lighten,
-                "Add":      QPainter.CompositionMode_Plus,
-                "Difference": QPainter.CompositionMode_Difference,
-                "Exclusion":  QPainter.CompositionMode_Exclusion,
-            }
-            painter.setCompositionMode(_blend_map.get(blend_mode, QPainter.CompositionMode_SourceOver))
-
-            center_x = (proj_w / 2) + pos_x
-            center_y = (proj_h / 2) + pos_y
-            painter.translate(center_x, center_y)
-            
-            if rotation != 0:
-                painter.rotate(rotation)
-                
+            painter.setOpacity(op/100.0)
+            painter.translate((proj_w / 2) + px, (proj_h / 2) + py)
+            if rot != 0: painter.rotate(rot)
+            iw, ih = qimg.width(), qimg.height()
+            cw, ch = iw * (props.get("crop_w", 100)/100), ih * (props.get("crop_h", 100)/100)
+            source_rect = QRectF(iw * (props.get("crop_x", 0)/100), ih * (props.get("crop_y", 0)/100), cw, ch)
             ratio = min(proj_w / cw, proj_h / ch)
-            draw_w = cw * ratio * scale_pct
-            draw_h = ch * ratio * scale_pct
-
-            # Corner radius support
-            corner_radius = props.get("Corner_Radius", 0)
-            if corner_radius > 0:
+            dw, dh = cw * ratio * (sc/100.0), ch * ratio * (sc/100.0)
+            if props.get("Corner_Radius", 0) > 0:
                 from PySide6.QtGui import QPainterPath
                 path = QPainterPath()
-                path.addRoundedRect(QRectF(-draw_w / 2, -draw_h / 2, draw_w, draw_h), corner_radius, corner_radius)
+                path.addRoundedRect(QRectF(-dw/2, -dh/2, dw, dh), props["Corner_Radius"], props["Corner_Radius"])
                 painter.setClipPath(path)
-
-            painter.drawImage(QRectF(-draw_w / 2, -draw_h / 2, draw_w, draw_h), qimg, source_rect)
+            painter.drawImage(QRectF(-dw/2, -dh/2, dw, dh), qimg, source_rect)
             painter.restore()
+            
+        return pending_seek
+
+    def _composite_frame(self, logical_time):
+        if not CV2_AVAILABLE: return self._create_error_frame("OpenCV Missing"), set(), False
+        project = project_manager.current_project
+        if not project: return None
+        proj_w, proj_h = project.resolution
+        rw, rh = int(proj_w * self._render_scale), int(proj_h * self._render_scale)
+        canvas = QImage(rw, rh, QImage.Format_ARGB32); canvas.fill(Qt.black)
+        painter = QPainter(canvas)
+        painter.setRenderHint(QPainter.Antialiasing, self._render_scale >= 1.0)
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, self._render_scale >= 1.0)
+        painter.scale(self._render_scale, self._render_scale)
+        current_ms, active_ids, total_pending = int(logical_time * 10), set(), False
+        for track in reversed(project.tracks):
+            if track.is_hidden: continue
+            for original in track.clips:
+                clip = self._get_effective_clip(original)
+                if clip.start_time <= current_ms < clip.end_time:
+                    active_ids.add(clip.clip_id)
+                    if clip.clip_type in ["video", "image"]: 
+                        pending = self._draw_media(painter, clip, current_ms, proj_w, proj_h)
+                        if pending: total_pending = True
+                    elif clip.clip_type == "caption": self._draw_caption(painter, clip, current_ms, proj_w, proj_h)
+        painter.end()
+        return canvas, active_ids, total_pending
 
     def _apply_cv_effects(self, frame, clip, current_ms=0, has_alpha=False):
-        """Apply OpenCV-based visual effects to a frame based on clip's applied_effects with Keyframes."""
-        if not isinstance(clip.applied_effects, dict):
-            return frame
-            
-        rel_time = max(0.0, (current_ms - clip.start_time) / 10.0)
-        
-        def get_val(key, default):
-            if hasattr(clip, 'get_animated_value'):
-                return clip.get_animated_value(key, rel_time, clip.applied_effects.get(key, default))
-            return clip.applied_effects.get(key, default)
-        
-        effects_list = clip.applied_effects.get("applied_effects", [])
-        if isinstance(effects_list, str):
-            effects_list = [effects_list]
-        elif not isinstance(effects_list, list):
-            effects_list = []
-        
-        primary = clip.applied_effects.get("primary_effect", "")
-        if primary and primary not in effects_list:
-            effects_list.append(primary)
-        
-        if not effects_list:
-            return frame
-        
-        amount = get_val("effect_amount", 100) / 100.0
-        
-        for effect_name in effects_list:
-            effect_lower = effect_name.lower()
-            
-            if "blur" in effect_lower or "gaussian" in effect_lower:
-                frame = self._fx_blur(frame, amount, clip.applied_effects, clip, rel_time)
-            elif "glow" in effect_lower or "cinematic" in effect_lower:
-                frame = self._fx_glow(frame, amount, clip.applied_effects, clip, rel_time)
-            elif "vignette" in effect_lower:
-                frame = self._fx_vignette(frame, amount, clip.applied_effects, clip, rel_time)
-            elif "color" in effect_lower and "grade" in effect_lower:
-                frame = self._fx_color_grade(frame, amount, clip.applied_effects, clip, rel_time)
-            elif "vhs" in effect_lower:
-                frame = self._fx_vhs(frame, amount, clip.applied_effects, clip, rel_time)
-            elif "glitch" in effect_lower:
-                frame = self._fx_glitch(frame, amount, clip.applied_effects, clip, rel_time)
-        
+        if not isinstance(clip.applied_effects, dict): return frame
+        rel_t = max(0.0, (current_ms - clip.start_time) / 10.0)
+        fxs = clip.applied_effects.get("applied_effects", [])
+        if not fxs: return frame
+        amt = (clip.get_animated_value("effect_amount", rel_t, 100) if hasattr(clip, 'get_animated_value') else 100) / 100.0
+        for fx in (fxs if isinstance(fxs, list) else [fxs]):
+            fxl = fx.lower()
+            if "blur" in fxl: frame = self._fx_blur(frame, amt, clip.applied_effects, clip, rel_t)
+            elif "glow" in fxl: frame = self._fx_glow(frame, amt, clip.applied_effects, clip, rel_t)
+            elif "vignette" in fxl: frame = self._fx_vignette(frame, amt, clip.applied_effects, clip, rel_t)
+            elif "color" in fxl: frame = self._fx_color_grade(frame, amt, clip.applied_effects, clip, rel_t)
+            elif "vhs" in fxl: frame = self._fx_vhs(frame, amt, clip.applied_effects, clip, rel_t)
+            elif "glitch" in fxl: frame = self._fx_glitch(frame, amt, clip.applied_effects, clip, rel_t)
         return frame
-    
-    def _fx_blur(self, frame, amount, props, clip, rel_time):
-        radius_base = props.get("radius", 15)
-        if hasattr(clip, 'get_animated_value'):
-            radius_base = clip.get_animated_value("radius", rel_time, radius_base)
-            
-        radius = int(radius_base * amount)
-        if radius < 1:
-            return frame
-        # Kernel must be odd
-        k = max(1, radius) | 1
-        return cv2.GaussianBlur(frame, (k, k), 0)
-    
-    def _fx_glow(self, frame, amount, props, clip, rel_time):
-        radius_base = props.get("radius", 30)
-        if hasattr(clip, 'get_animated_value'):
-            radius_base = clip.get_animated_value("radius", rel_time, radius_base)
-            
-        radius = int(radius_base * amount)
-        if radius < 1:
-            return frame
-        k = max(1, radius) | 1
-        
-        # Work on BGR channels only (ignore alpha if present)
-        work = frame[:, :, :3] if frame.shape[2] >= 3 else frame
-        
-        blurred = cv2.GaussianBlur(work, (k, k), 0)
-        # Additive blend for bloom
-        result = cv2.addWeighted(work, 1.0, blurred, amount * 0.5, 0)
-        
-        if frame.shape[2] == 4:
-            frame[:, :, :3] = result
-            return frame
-        return result
-    
-    def _fx_vignette(self, frame, amount, props, clip, rel_time):
-        h, w = frame.shape[:2]
-        
-        rad_base = props.get("radius", 70)
-        soft_base = props.get("softness", 50)
-        
-        if hasattr(clip, 'get_animated_value'):
-            rad_base = clip.get_animated_value("radius", rel_time, rad_base)
-            soft_base = clip.get_animated_value("softness", rel_time, soft_base)
-            
-        radius_pct = rad_base / 100.0
-        softness = soft_base / 100.0
-        
-        # Create radial gradient mask
-        Y, X = np.ogrid[:h, :w]
-        cx, cy = w / 2, h / 2
-        dist = np.sqrt((X - cx) ** 2 + (Y - cy) ** 2)
-        max_dist = np.sqrt(cx ** 2 + cy ** 2)
-        
-        # Normalize and apply radius
-        norm_dist = dist / (max_dist * max(0.1, radius_pct))
-        mask = np.clip(1.0 - norm_dist, 0, 1)
-        
-        # Apply softness
-        sigma = max(1, int(softness * 100)) | 1
-        mask = cv2.GaussianBlur(mask.astype(np.float32), (sigma, sigma), 0)
-        
-        # Blend with amount
-        mask = 1.0 - (1.0 - mask) * amount
-        
-        mask_3d = np.dstack([mask] * frame.shape[2]) if len(frame.shape) == 3 else mask
-        result = (frame.astype(np.float32) * mask_3d).astype(np.uint8)
-        return result
-    
-    def _fx_color_grade(self, frame, amount, props, clip, rel_time):
-        b_base = props.get("brightness", 0)
-        c_base = props.get("contrast", 10)
-        s_base = props.get("saturation", 15)
-        
-        if hasattr(clip, 'get_animated_value'):
-            b_base = clip.get_animated_value("brightness", rel_time, b_base)
-            c_base = clip.get_animated_value("contrast", rel_time, c_base)
-            s_base = clip.get_animated_value("saturation", rel_time, s_base)
-            
-        brightness = b_base * amount
-        contrast = c_base * amount
-        saturation = s_base * amount
-        
-        work = frame[:, :, :3] if frame.shape[2] >= 3 else frame
-        result = work.astype(np.float32)
-        
-        # Brightness
-        result += brightness
-        
-        # Contrast
-        factor = (259 * (contrast + 255)) / (255 * (259 - contrast))
-        result = factor * (result - 128) + 128
-        
-        # Saturation
-        if abs(saturation) > 0.1:
-            hsv = cv2.cvtColor(np.clip(result, 0, 255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
-            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * (1 + saturation / 100.0), 0, 255)
-            result = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
-        
-        result = np.clip(result, 0, 255).astype(np.uint8)
-        
-        if frame.shape[2] == 4:
-            frame[:, :, :3] = result
-            return frame
-        return result
-    
-    def _fx_vhs(self, frame, amount, props, clip, rel_time):
-        h, w = frame.shape[:2]
-        work = frame[:, :, :3] if frame.shape[2] >= 3 else frame
-        result = work.copy()
-        
-        cs_base = props.get("chromatic_shift", 5)
-        so_base = props.get("scanline_opacity", 40)
-        n_base = props.get("noise", 30)
-        
-        if hasattr(clip, 'get_animated_value'):
-            cs_base = clip.get_animated_value("chromatic_shift", rel_time, cs_base)
-            so_base = clip.get_animated_value("scanline_opacity", rel_time, so_base)
-            n_base = clip.get_animated_value("noise", rel_time, n_base)
-            
-        shift = int(cs_base * amount)
-        if shift > 0:
-            result[:, shift:, 2] = work[:, :-shift, 2]  # Blue channel shift right
-            result[:, :-shift, 0] = work[:, shift:, 0]  # Red channel shift left
-        
-        scanline_opacity = so_base / 100.0 * amount
-        if scanline_opacity > 0:
-            for y in range(0, h, 2):
-                result[y, :] = (result[y, :].astype(np.float32) * (1 - scanline_opacity * 0.5)).astype(np.uint8)
-        
-        noise_amount = n_base / 100.0 * amount
-        if noise_amount > 0:
-            noise = np.random.randint(-25, 25, result.shape, dtype=np.int16)
-            result = np.clip(result.astype(np.int16) + (noise * noise_amount).astype(np.int16), 0, 255).astype(np.uint8)
-        
-        if frame.shape[2] == 4:
-            frame[:, :, :3] = result
-            return frame
-        return result
-    
-    def _fx_glitch(self, frame, amount, props, clip, rel_time):
-        h, w = frame.shape[:2]
-        work = frame.copy()
-        
-        bs_base = props.get("block_size", 10)
-        sa_base = props.get("shift_amount", 20)
-        
-        if hasattr(clip, 'get_animated_value'):
-            bs_base = clip.get_animated_value("block_size", rel_time, bs_base)
-            sa_base = clip.get_animated_value("shift_amount", rel_time, sa_base)
-            
-        block_size = max(2, int(bs_base))
-        shift_amount = int(sa_base * amount)
-        
-        if shift_amount < 1:
-            return frame
-        
-        # Random block shifts
-        num_blocks = max(1, int(h / block_size * amount * 0.3))
-        for _ in range(num_blocks):
-            y_start = random.randint(0, max(0, h - block_size))
-            y_end = min(h, y_start + block_size)
-            shift = random.randint(-shift_amount, shift_amount)
-            
-            if shift > 0:
-                work[y_start:y_end, shift:] = frame[y_start:y_end, :w-shift]
-            elif shift < 0:
-                work[y_start:y_end, :w+shift] = frame[y_start:y_end, -shift:]
-        
-        return work
 
-    @staticmethod
-    def _wrap_text(text, max_chars, word_wrap, max_lines):
-        """Break text into lines based on layout settings."""
-        if max_chars <= 0 or not text:
-            lines = [text] if text else [""]
-            return lines[:max_lines] if max_lines > 0 else lines
-        
-        result_lines = []
-        paragraphs = text.split('\n')
-        
-        for paragraph in paragraphs:
-            if not paragraph.strip():
-                result_lines.append("")
-                continue
-                
-            if len(paragraph) <= max_chars:
-                result_lines.append(paragraph)
-                continue
-            
-            if word_wrap:
-                # Word-boundary wrapping
-                words = paragraph.split(' ')
-                current_line = ""
-                for word in words:
-                    test = f"{current_line} {word}".strip() if current_line else word
-                    if len(test) <= max_chars:
-                        current_line = test
-                    else:
-                        if current_line:
-                            result_lines.append(current_line)
-                        # Handle single words longer than max_chars
-                        while len(word) > max_chars:
-                            result_lines.append(word[:max_chars])
-                            word = word[max_chars:]
-                        current_line = word
-                if current_line:
-                    result_lines.append(current_line)
-            else:
-                # Hard character break
-                for i in range(0, len(paragraph), max_chars):
-                    result_lines.append(paragraph[i:i + max_chars])
-        
-        if max_lines > 0 and len(result_lines) > max_lines:
-            result_lines = result_lines[:max_lines]
-            # Add ellipsis to last line if truncated
-            if result_lines:
-                last = result_lines[-1]
-                if len(last) > 3:
-                    result_lines[-1] = last[:-3] + "..."
-        
-        return result_lines if result_lines else [""]
+    def _fx_blur(self, f, a, p, c, t):
+        r = int((c.get_animated_value("radius", t, 15) if hasattr(c, 'get_animated_value') else 15) * a)
+        if r < 1: return f
+        return cv2.GaussianBlur(f, (r|1, r|1), 0)
+
+    def _fx_glow(self, f, a, p, c, t):
+        r = int((c.get_animated_value("radius", t, 30) if hasattr(c, 'get_animated_value') else 30) * a)
+        if r < 1: return f
+        w = f[:,:,:3] if f.shape[2]>=3 else f
+        res = cv2.addWeighted(w, 1.0, cv2.GaussianBlur(w, (r|1, r|1), 0), a*0.5, 0)
+        if f.shape[2]==4: f[:,:,:3]=res; return f
+        return res
+
+    def _fx_vignette(self, f, a, p, c, t):
+        h, w = f.shape[:2]
+        rp = (c.get_animated_value("radius", t, 70) if hasattr(c, 'get_animated_value') else 70)/100.0
+        Y, X = np.ogrid[:h, :w]
+        mask = np.clip(1.0 - np.sqrt((X-w/2)**2 + (Y-h/2)**2) / (np.sqrt((w/2)**2 + (h/2)**2) * max(0.1, rp)), 0, 1)
+        return (f.astype(np.float32) * np.dstack([1.0 - (1.0 - mask) * a]*f.shape[2])).astype(np.uint8)
+
+    def _fx_color_grade(self, f, a, p, c, t):
+        br, co, sa = [ (c.get_animated_value(k, t, d) if hasattr(c, 'get_animated_value') else d) * a for k,d in [("brightness",0),("contrast",10),("saturation",15)]]
+        w = f[:,:,:3].astype(np.float32); w += br
+        fct = (259*(co+255))/(255*(259-co)); w = fct*(w-128)+128
+        if abs(sa) > 0.1:
+            hsv = cv2.cvtColor(np.clip(w,0,255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
+            hsv[:,:,1] = np.clip(hsv[:,:,1]*(1+sa/100),0,255)
+            w = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
+        res = np.clip(w,0,255).astype(np.uint8)
+        if f.shape[2]==4: f[:,:,:3]=res; return f
+        return res
+
+    def _fx_vhs(self, f, a, p, c, t):
+        h, w = f.shape[:2]; res = (f[:,:,:3] if f.shape[2]>=3 else f).copy()
+        sh = int((c.get_animated_value("chromatic_shift", t, 5) if hasattr(c, 'get_animated_value') else 5)*a)
+        if sh > 0: res[:,sh:,2] = f[:,:-sh,2]; res[:,:-sh,0] = f[:,sh:,0]
+        n = (c.get_animated_value("noise", t, 30) if hasattr(c, 'get_animated_value') else 30)/100*a
+        if n > 0: res = np.clip(res.astype(np.int16)+(np.random.randint(-25,25,res.shape)*n).astype(np.int16),0,255).astype(np.uint8)
+        if f.shape[2]==4: f[:,:,:3]=res; return f
+        return res
+
+    def _fx_glitch(self, f, a, p, c, t):
+        h, w = f.shape[:2]; res = f.copy()
+        sa = int((c.get_animated_value("shift_amount", t, 20) if hasattr(c, 'get_animated_value') else 20)*a)
+        bs = max(2, int(c.get_animated_value("block_size", t, 10) if hasattr(c, 'get_animated_value') else 10))
+        if sa < 1: return f
+        for _ in range(max(1, int(h/bs*a*0.3))):
+            y, s = random.randint(0, max(0, h-bs)), random.randint(-sa, sa)
+            if s > 0: res[y:y+bs, s:] = f[y:y+bs, :w-s]
+            elif s < 0: res[y:y+bs, :w+s] = f[y:y+bs, -s:]
+        return res
 
     def _draw_caption(self, painter, clip, current_ms, proj_w, proj_h):
-        props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
-        
-        # Text source: applied_effects["text"] (from property panel) > file_path (initial text from timeline item)
-        text = props.get("text", "") or clip.file_path or "New Caption"
-        if not text.strip(): 
-            text = "New Caption"
-            
-        preset_name = props.get("preset_name", "")
-        duration_ms = clip.end_time - clip.start_time
-        elapsed_ms = current_ms - clip.start_time
-        progress = max(0.0, min(1.0, elapsed_ms / max(1, duration_ms)))
-
-        # Typewriter Effect
-        if preset_name == "Typewriter":
-            total_chars = len(text)
-            visible_chars = int(total_chars * progress)
-            text = text[:visible_chars]
-        
-        font_family = props.get("Font Family", "Arial")
-        color_hex = props.get("Text Color", "#FFFFFF")
-        outline_color = props.get("outline_color", "#000000")
-        bg_color_hex = props.get("Bg Color", "transparent")
-        
-        font_size_base = max(1, int(props.get("Font Size", 80)))
-        outline_width_base = props.get("outline_width", 2)
-        bg_opacity_base = props.get("bg_opacity", 0)
-        
-        # --- EVALUATE KEYFRAMES DYNAMICALLY ---
-        if hasattr(clip, 'get_animated_value'):
-            rel_time = max(0.0, (current_ms - clip.start_time) / 10.0)
-            pos_x = clip.get_animated_value("Position_X", rel_time, props.get("Position_X", 0))
-            pos_y = clip.get_animated_value("Position_Y", rel_time, props.get("Position_Y", 0))
-            opacity = clip.get_animated_value("Opacity", rel_time, props.get("Opacity", 100)) / 100.0
-            rotation = clip.get_animated_value("Rotation", rel_time, props.get("Rotation", 0))
-            scale_pct = clip.get_animated_value("Scale", rel_time, props.get("Scale", 100)) / 100.0
-            
-            font_size = max(1, int(clip.get_animated_value("Font Size", rel_time, font_size_base)))
-            outline_width = clip.get_animated_value("outline_width", rel_time, outline_width_base)
-            bg_opacity = clip.get_animated_value("bg_opacity", rel_time, bg_opacity_base) / 100.0
-        else:
-            pos_x = props.get("Position_X", 0)
-            pos_y = props.get("Position_Y", 0)
-            opacity = props.get("Opacity", 100) / 100.0
-            rotation = props.get("Rotation", 0)
-            scale_pct = props.get("Scale", 100) / 100.0
-            
-            font_size = font_size_base
-            outline_width = outline_width_base
-            bg_opacity = bg_opacity_base / 100.0
-        
-        # Pop-up Animation
-        animation = props.get("animation", "Scale In")
-        if preset_name == "Pop-up" and elapsed_ms < 500: # First 0.5s
-            anim_progress = max(0.0, min(1.0, elapsed_ms / 500.0))
-            if animation == "Scale In":
-                import math
-                scale_pct *= math.sin(anim_progress * math.pi / 2.0)
-            elif animation == "Fade In":
-                opacity *= anim_progress
-            elif animation == "Bounce":
-                import math
-                scale_pct *= min(1.0, math.sin(anim_progress * math.pi) * 0.3 + anim_progress)
-
-        # Text layout properties
-        max_chars = int(props.get("max_chars_per_line", 0))  # 0 = no limit
-        max_lines = int(props.get("max_lines", 0))           # 0 = no limit
-        word_wrap = bool(props.get("word_wrap", True))
-        text_align = props.get("text_align", "Center")
-        
-        # Font weight mapping
-        weight_map = {
-            "Regular": QFont.Normal, "Bold": QFont.Bold,
-            "Light": QFont.Light, "Black": QFont.Black,
-            "Thin": QFont.Thin, "Medium": QFont.Medium,
-            "DemiBold": QFont.DemiBold, "ExtraBold": QFont.ExtraBold,
-        }
-        font_weight_name = props.get("font_weight", "Bold")
-        font_weight = weight_map.get(font_weight_name, QFont.Bold)
-        
+        p = clip.applied_effects or {}
+        text = p.get("text", "") or clip.file_path or "New Caption"
+        if p.get("preset_name") == "Typewriter": text = text[:int(len(text)*(max(0,min(1,(current_ms-clip.start_time)/(clip.end_time-clip.start_time)))))]
+        t = max(0.0, (current_ms-clip.start_time)/10.0)
+        def gv(k, d): return clip.get_animated_value(k, t, p.get(k, d)) if hasattr(clip, 'get_animated_value') else p.get(k, d)
         painter.save()
-        painter.setOpacity(opacity)
-        
-        center_x = proj_w / 2 + pos_x
-        center_y = proj_h / 2 + pos_y
-        painter.translate(center_x, center_y)
-        
-        if rotation != 0:
-            painter.rotate(rotation)
-        if scale_pct != 1.0:
-            painter.scale(scale_pct, scale_pct)
-        
-        font = QFont(font_family, font_size, font_weight)
-        painter.setFont(font)
-        fm = painter.fontMetrics()
-        
-        # Apply text layout wrapping
-        lines = self._wrap_text(text, max_chars, word_wrap, max_lines)
-        
-        # Calculate total bounds
-        line_height = fm.height()
-        line_spacing = int(line_height * 0.15)
-        total_h = len(lines) * line_height + max(0, len(lines) - 1) * line_spacing
-        max_line_w = max(fm.horizontalAdvance(line) for line in lines) if lines else 0
-        
-        # Alignment flag
-        align_map = {"Left": Qt.AlignLeft, "Center": Qt.AlignHCenter, "Right": Qt.AlignRight}
-        h_align = align_map.get(text_align, Qt.AlignHCenter)
-        
-        # Background box
-        if bg_color_hex and bg_color_hex != "transparent" and bg_opacity > 0:
-            bg_padding = int(props.get("bg_padding", 16))
-            bg_radius = int(props.get("bg_radius", 8))
-            bg_color = QColor(bg_color_hex)
-            bg_color.setAlphaF(bg_opacity)
-            painter.setBrush(QBrush(bg_color))
-            painter.setPen(Qt.NoPen)
-            bg_rect = QRectF(
-                -max_line_w / 2 - bg_padding,
-                -total_h / 2 - bg_padding,
-                max_line_w + bg_padding * 2,
-                total_h + bg_padding * 2
-            )
-            painter.drawRoundedRect(bg_rect, bg_radius, bg_radius)
-        
-        # Karaoke Active Word logic
-        active_word_idx = -1
-        words_list = text.split()
-        if preset_name == "Karaoke" and words_list:
-            active_word_idx = min(len(words_list) - 1, int(len(words_list) * progress))
-        highlight_color_hex = props.get("highlight_color", "#FFD700")
-
-        # Draw each line
-        y_start = -total_h / 2
-        global_word_counter = 0
-
+        painter.setOpacity(gv("Opacity", 100)/100.0)
+        painter.translate(proj_w/2+gv("Position_X", 0), proj_h/2+gv("Position_Y", 0))
+        rot, sc = gv("Rotation", 0), gv("Scale", 100)/100.0
+        if rot != 0: painter.rotate(rot)
+        if sc != 1.0: painter.scale(sc, sc)
+        font = QFont(p.get("Font Family", "Arial"), max(1, int(gv("Font Size", 80))), QFont.Bold)
+        painter.setFont(font); fm = painter.fontMetrics()
+        lines = self._wrap_text(text, int(p.get("max_chars_per_line", 0)), bool(p.get("word_wrap", True)), int(p.get("max_lines", 0)))
+        th = len(lines)*fm.height()
         for i, line in enumerate(lines):
-            line_y = y_start + i * (line_height + line_spacing)
-            line_rect = QRectF(-max_line_w / 2, line_y, max_line_w, line_height)
-            
-            if preset_name == "Karaoke":
-                # Draw words individually
-                line_words = line.split(" ")
-                words_with_spaces = [w + " " for w in line_words]
-                if words_with_spaces:
-                    words_with_spaces[-1] = words_with_spaces[-1].strip() # remove last space
-                
-                # Calculate starting X for alignment
-                total_line_w = fm.horizontalAdvance(line)
-                if h_align == Qt.AlignLeft:
-                    current_x = line_rect.left()
-                elif h_align == Qt.AlignRight:
-                    current_x = line_rect.right() - total_line_w
-                else:
-                    current_x = line_rect.center().x() - (total_line_w / 2)
-                    
-                for w_idx, word in enumerate(words_with_spaces):
-                    adv = fm.horizontalAdvance(word)
-                    word_rect = QRectF(current_x, line_y, adv, line_height)
-                    
-                    is_active = (global_word_counter == active_word_idx)
-                    draw_color = highlight_color_hex if is_active else color_hex
-                    
-                    if outline_width > 0:
-                        painter.setPen(QPen(QColor(outline_color), outline_width))
-                        for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1), (0, -1), (0, 1), (-1, 0), (1, 0)]:
-                            offset_rect = word_rect.translated(dx * outline_width, dy * outline_width)
-                            painter.drawText(offset_rect, Qt.AlignLeft | Qt.AlignVCenter, word.strip())
-                            
-                    painter.setPen(QColor(draw_color))
-                    painter.drawText(word_rect, Qt.AlignLeft | Qt.AlignVCenter, word.strip())
-                    
-                    current_x += adv
-                    global_word_counter += 1
-            else:
-                # Text outline / shadow
-                if outline_width > 0:
-                    painter.setPen(QPen(QColor(outline_color), outline_width))
-                    for dx, dy in [(-1, -1), (-1, 1), (1, -1), (1, 1), (0, -1), (0, 1), (-1, 0), (1, 0)]:
-                        offset_rect = QRectF(
-                            line_rect.x() + dx * outline_width, 
-                            line_rect.y() + dy * outline_width,
-                            line_rect.width(), line_rect.height()
-                        )
-                        painter.drawText(offset_rect, h_align | Qt.AlignVCenter, line)
-                
-                # Main text
-                painter.setPen(QColor(color_hex))
-                painter.drawText(line_rect, h_align | Qt.AlignVCenter, line)
-        
+            painter.setPen(QColor(p.get("Text Color", "#FFFFFF")))
+            painter.drawText(QRectF(-500, -th/2+i*fm.height(), 1000, fm.height()), Qt.AlignCenter, line)
         painter.restore()
 
+    def _wrap_text(self, text, m, w, l):
+        if m <= 0 or not text: return [text] if text else [""]
+        res = []
+        for p in text.split('\n'):
+            if not p.strip(): res.append(""); continue
+            if len(p) <= m: res.append(p); continue
+            if w:
+                curr = ""
+                for word in p.split(' '):
+                    test = f"{curr} {word}".strip() if curr else word
+                    if len(test) <= m: curr = test
+                    else:
+                        if curr: res.append(curr)
+                        while len(word) > m: res.append(word[:m]); word = word[m:]
+                        curr = word
+                if curr: res.append(curr)
+            else:
+                for i in range(0, len(p), m): res.append(p[i:i + m])
+        return res[:l] if l > 0 and len(res) > l else res
+
     def _create_error_frame(self, message):
-        img = QImage(1280, 720, QImage.Format_ARGB32)
-        img.fill(Qt.black)
-        painter = QPainter(img)
-        painter.setPen(Qt.white)
-        painter.setFont(QFont("Arial", 24, QFont.Bold))
-        painter.drawText(img.rect(), Qt.AlignCenter, message)
-        painter.end()
+        img = QImage(1280, 720, QImage.Format_ARGB32); img.fill(Qt.black)
+        p = QPainter(img); p.setPen(Qt.white); p.setFont(QFont("Arial", 24, QFont.Bold))
+        p.drawText(img.rect(), Qt.AlignCenter, message); p.end()
         return img
