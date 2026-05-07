@@ -156,3 +156,7 @@ cython_debug/
 *.render_cache
 output/
 temp/
+
+
+# Test Projects
+Project-05-06/
