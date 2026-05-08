@@ -9,3 +9,4 @@ sounddevice
 qtawesome
 psutil
 opencv-python
+PyOpenGL

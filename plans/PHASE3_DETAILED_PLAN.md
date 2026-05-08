@@ -10,7 +10,7 @@ This is the master index for the GPU migration and Cloud Store integration. The 
 - **Start Prompt:** [START_PROMPT_PHASE_3_1.md](phase3/START_PROMPT_PHASE_3_1.md)
 
 ### 2. [Shader Manager & Viewport Core](phase3/sub_phase_2.md)
-- **Status:** Ready 🚀
+- **Status:** Completed ✅
 - **Goal:** OpenGL 3.3 Core foundation, PBO async uploads, and hot-reloading Shader Manager.
 - **Start Prompt:** [START_PROMPT_PHASE_3_2.md](phase3/START_PROMPT_PHASE_3_2.md)
 

@@ -145,7 +145,11 @@ class VideoDecoder(QThread):
                         
                         # Push to UI queue (Mapping time to logical timeline units)
                         logical_out = (frame.time * 1000) / 10.0
-                        self.frame_queue.put((logical_out, image))
+                        try:
+                            self.frame_queue.put((logical_out, image), timeout=0.1)
+                        except queue.Full:
+                            # Skip frame or wait if queue is full during shutdown
+                            pass
                         
                         # Only push the first matching frame for a seek, then wait for next loop
                         break
@@ -163,7 +167,10 @@ class VideoDecoder(QThread):
                             
                             self.frame_cache.put(frame.pts, image, current_scale)
                             logical_out = (frame.time * 1000) / 10.0
-                            self.frame_queue.put((logical_out, image))
+                            try:
+                                self.frame_queue.put((logical_out, image), timeout=0.1)
+                            except queue.Full:
+                                pass
                         except (StopIteration, av.error.FFmpegError):
                             # Loop or wait at EOF
                             time.sleep(0.01)

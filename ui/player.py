@@ -17,25 +17,32 @@ from core.project_manager import project_manager
 from core.render_engine import RenderEngine
 from core.app_config import app_config
 from core.audio_mixer import audio_mixer, AudioTrack
+from core.logger import hive_logger
 
 
-class TimelinePreviewCanvas(QWidget):
+from ui.viewport import HiveViewport
+
+
+class TimelinePreviewCanvas(HiveViewport):
     """Custom drawing surface for the RenderEngine frames with interactive clip manipulation."""
     
     transform_changed = Signal(str, str, object)  # clip_id, prop_name, value
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.current_frame = None
+        self.current_frame_q = None
         self.current_time = 0.0  # Synced to playhead in logical units
-        self.setStyleSheet("background-color: #000000; border-radius: 8px;")
+        # Remove background-color stylesheet as it can interfere with OpenGL
+        self.setStyleSheet("border-radius: 8px;")
         self.setMouseTracking(True)
+        self.setFocusPolicy(Qt.StrongFocus)
         
         # Interactive state
         self._selected_clip_id = ""
         self._selected_clip_bounds = None  # QRectF in canvas coordinates
         self._dragging = False
         self._rotating = False
+        self._resizing = False
         self._drag_start = QPointF()
         self._drag_start_pos = (0, 0)  # Original Position_X, Position_Y
         self._drag_start_rotation = 0
@@ -53,20 +60,70 @@ class TimelinePreviewCanvas(QWidget):
         self.current_time = time_logical
         
     def set_frame(self, qimage):
-        self.current_frame = qimage
-        self.update() 
+        """Legacy QImage support (used for mapping calculations)."""
+        self.current_frame_q = qimage
+        # We don't call update() here anymore, update_frame() handles it
     
+    def paintGL(self):
+        """First, render the video frame using OpenGL."""
+        super().paintGL()
+        
+        # Then, render interactive handles using QPainter on top
+        painter = QPainter(self)
+        
+        if self._show_handles and self._selected_clip_id:
+            clip = self._get_selected_clip_data()
+            if clip and clip.clip_type in ("video", "image", "caption"):
+                bounds = self._get_clip_screen_bounds(clip)
+                if bounds:
+                    cx, cy = bounds["cx"], bounds["cy"]
+                    hw, hh = bounds["hw"], bounds["hh"]
+                    rotation = bounds["rotation"]
+                    
+                    painter.save()
+                    painter.translate(cx, cy)
+                    painter.rotate(rotation)
+                    
+                    painter.setPen(QPen(QColor("#e66b2c"), 2, Qt.DashLine))
+                    painter.setBrush(Qt.NoBrush)
+                    painter.drawRect(QRectF(-hw, -hh, hw * 2, hh * 2))
+                    
+                    handle_size = 8
+                    corners = [
+                        QPointF(-hw, -hh), QPointF(hw, -hh),
+                        QPointF(-hw, hh), QPointF(hw, hh)
+                    ]
+                    painter.setPen(QPen(QColor("#ffffff"), 1))
+                    painter.setBrush(QColor("#e66b2c"))
+                    for corner in corners:
+                        painter.drawRect(QRectF(
+                            corner.x() - handle_size/2, corner.y() - handle_size/2,
+                            handle_size, handle_size
+                        ))
+                    
+                    top_center = QPointF(0, -hh - 25)
+                    painter.setPen(QPen(QColor("#ffffff"), 1))
+                    painter.setBrush(QColor("#4299e1"))
+                    painter.drawEllipse(top_center, 6, 6)
+                    
+                    painter.setPen(QPen(QColor("#4299e1"), 1))
+                    painter.drawLine(0, 0, 0, int(top_center.y() + 6))
+                    
+                    painter.restore()
+        
+        painter.end()
+
     def _update_canvas_mapping(self):
         """Calculate the mapping between canvas widget coords and project coords."""
-        if self.current_frame and not self.current_frame.isNull():
+        # Use frame_width/height from HiveViewport instead of current_frame_q
+        if self.frame_width > 0 and self.frame_height > 0:
             cw, ch = self.width(), self.height()
-            fw, fh = self.current_frame.width(), self.current_frame.height()
-            if fw > 0 and fh > 0:
-                self._canvas_scale = min(cw / fw, ch / fh)
-                nw = fw * self._canvas_scale
-                nh = fh * self._canvas_scale
-                self._canvas_offset_x = (cw - nw) / 2
-                self._canvas_offset_y = (ch - nh) / 2
+            fw, fh = self.frame_width, self.frame_height
+            self._canvas_scale = min(cw / fw, ch / fh)
+            nw = fw * self._canvas_scale
+            nh = fh * self._canvas_scale
+            self._canvas_offset_x = (cw - nw) / 2
+            self._canvas_offset_y = (ch - nh) / 2
     
     def _canvas_to_project(self, canvas_point):
         """Convert canvas widget coordinates to project coordinates."""
@@ -105,7 +162,7 @@ class TimelinePreviewCanvas(QWidget):
     
     def _get_clip_screen_bounds(self, clip):
         """Calculate the on-screen bounds of a clip for handle drawing."""
-        if not clip or not self.current_frame:
+        if not clip or self.frame_width <= 0:
             return None
         
         props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
@@ -115,8 +172,11 @@ class TimelinePreviewCanvas(QWidget):
         base_zoom = props.get("Scale", 100) / 100.0
         base_rot = props.get("Rotation", 0)
         
+        # USE FRAME-ACCURATE TIMING: Use the time of the frame actually on the GPU
+        sync_time = self.last_frame_time
+        
         if hasattr(clip, 'get_animated_value'):
-            rel_time = max(0.0, self.current_time - (clip.start_time / 10.0))
+            rel_time = max(0.0, sync_time - (clip.start_time / 10.0))
             pos_x = clip.get_animated_value("Position_X", rel_time, base_x)
             pos_y = clip.get_animated_value("Position_Y", rel_time, base_y)
             zoom = clip.get_animated_value("Scale", rel_time, base_zoom * 100) / 100.0
@@ -187,64 +247,6 @@ class TimelinePreviewCanvas(QWidget):
         if not invertible: return pos
         return t_inv.map(pos)
     
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.fillRect(self.rect(), Qt.black)
-        
-        if self.current_frame and not self.current_frame.isNull():
-            cw, ch = self.width(), self.height()
-            fw, fh = self.current_frame.width(), self.current_frame.height()
-            
-            if fw > 0 and fh > 0:
-                ratio = min(cw / fw, ch / fh)
-                nw, nh = int(fw * ratio), int(fh * ratio)
-                x, y = (cw - nw) // 2, (ch - nh) // 2
-                
-                painter.setRenderHint(QPainter.SmoothPixmapTransform, False)
-                painter.drawImage(QRect(x, y, nw, nh), self.current_frame)
-        
-        if self._show_handles and self._selected_clip_id:
-            clip = self._get_selected_clip_data()
-            if clip and clip.clip_type in ("video", "image", "caption"):
-                bounds = self._get_clip_screen_bounds(clip)
-                if bounds:
-                    cx, cy = bounds["cx"], bounds["cy"]
-                    hw, hh = bounds["hw"], bounds["hh"]
-                    rotation = bounds["rotation"]
-                    
-                    painter.save()
-                    painter.translate(cx, cy)
-                    painter.rotate(rotation)
-                    
-                    painter.setPen(QPen(QColor("#e66b2c"), 2, Qt.DashLine))
-                    painter.setBrush(Qt.NoBrush)
-                    painter.drawRect(QRectF(-hw, -hh, hw * 2, hh * 2))
-                    
-                    handle_size = 8
-                    corners = [
-                        QPointF(-hw, -hh), QPointF(hw, -hh),
-                        QPointF(-hw, hh), QPointF(hw, hh)
-                    ]
-                    painter.setPen(QPen(QColor("#ffffff"), 1))
-                    painter.setBrush(QColor("#e66b2c"))
-                    for corner in corners:
-                        painter.drawRect(QRectF(
-                            corner.x() - handle_size/2, corner.y() - handle_size/2,
-                            handle_size, handle_size
-                        ))
-                    
-                    top_center = QPointF(0, -hh - 25)
-                    painter.setPen(QPen(QColor("#ffffff"), 1))
-                    painter.setBrush(QColor("#4299e1"))
-                    painter.drawEllipse(top_center, 6, 6)
-                    
-                    painter.setPen(QPen(QColor("#4299e1"), 1))
-                    painter.drawLine(0, int(-hh), 0, int(top_center.y() + 6))
-                    
-                    painter.restore()
-        
-        painter.end()
-
     def _get_visible_clips(self):
         visible = []
         if not project_manager.current_project:
@@ -285,8 +287,9 @@ class TimelinePreviewCanvas(QWidget):
                         base_y = getattr(clip, "Position_Y", props.get("Position_Y", 0))
                         base_rot = props.get("Rotation", 0)
                         
+                        sync_time = self.last_frame_time
                         if hasattr(clip, 'get_animated_value'):
-                            rel_time = max(0.0, self.current_time - (clip.start_time / 10.0))
+                            rel_time = max(0.0, sync_time - (clip.start_time / 10.0))
                             curr_x = clip.get_animated_value("Position_X", rel_time, base_x)
                             curr_y = clip.get_animated_value("Position_Y", rel_time, base_y)
                             curr_rot = clip.get_animated_value("Rotation", rel_time, base_rot)
@@ -350,8 +353,9 @@ class TimelinePreviewCanvas(QWidget):
                         base_x = getattr(clicked_clip, "Position_X", props.get("Position_X", 0))
                         base_y = getattr(clicked_clip, "Position_Y", props.get("Position_Y", 0))
                         
+                        sync_time = self.last_frame_time
                         if hasattr(clicked_clip, 'get_animated_value'):
-                            rel_time = max(0.0, self.current_time - (clicked_clip.start_time / 10.0))
+                            rel_time = max(0.0, sync_time - (clicked_clip.start_time / 10.0))
                             curr_x = clicked_clip.get_animated_value("Position_X", rel_time, base_x)
                             curr_y = clicked_clip.get_animated_value("Position_Y", rel_time, base_y)
                         else:
@@ -390,7 +394,7 @@ class TimelinePreviewCanvas(QWidget):
                 
                 clip = self._get_selected_clip_data()
                 if clip:
-                    rel_time = max(0.0, self.current_time - (clip.start_time / 10.0))
+                    rel_time = max(0.0, self.last_frame_time - (clip.start_time / 10.0))
                     if hasattr(clip, 'is_keyframing_enabled'):
                         if clip.is_keyframing_enabled("Position_X"): clip.set_keyframe("Position_X", rel_time, new_x)
                         if clip.is_keyframing_enabled("Position_Y"): clip.set_keyframe("Position_Y", rel_time, new_y)
@@ -426,7 +430,7 @@ class TimelinePreviewCanvas(QWidget):
                     delta_angle = angle - start_angle
                     new_rotation = int(max(-360, min(360, self._drag_start_rotation + delta_angle)))
                     
-                    rel_time = max(0.0, self.current_time - (clip.start_time / 10.0))
+                    rel_time = max(0.0, self.last_frame_time - (clip.start_time / 10.0))
                     if hasattr(clip, 'is_keyframing_enabled') and clip.is_keyframing_enabled("Rotation"):
                         clip.set_keyframe("Rotation", rel_time, new_rotation)
                     
@@ -451,7 +455,7 @@ class TimelinePreviewCanvas(QWidget):
                     ratio = current_dist / self._drag_start_dist
                     new_scale = max(0.1, min(5.0, self._drag_start_scale * ratio))
                     
-                    rel_time = max(0.0, self.current_time - (clip.start_time / 10.0))
+                    rel_time = max(0.0, self.last_frame_time - (clip.start_time / 10.0))
                     if hasattr(clip, 'is_keyframing_enabled') and clip.is_keyframing_enabled("Scale"):
                         clip.set_keyframe("Scale", rel_time, new_scale * 100)
                         
@@ -555,6 +559,7 @@ class PlayerPanel(QFrame):
 
         self.render_engine = RenderEngine()
         self.render_engine.frame_ready.connect(self._on_timeline_frame_received)
+        self.render_engine.frame_ready_raw.connect(self._on_timeline_frame_received_raw)
         self.render_engine.start()
 
         self.setStyleSheet("""
@@ -709,6 +714,8 @@ class PlayerPanel(QFrame):
         # Initial rebuild in case the project was already loaded before this panel was initialized
         if project_manager.current_project:
             self._rebuild_audio_mixer()
+            # Force first frame on startup
+            QTimer.singleShot(1000, lambda: self.update_playhead(0))
 
         if QApplication.instance():
             QApplication.instance().aboutToQuit.connect(self._cleanup)
@@ -734,6 +741,10 @@ class PlayerPanel(QFrame):
 
     def _on_timeline_frame_received(self, frame):
         self.timeline_canvas.set_frame(frame)
+
+    def _on_timeline_frame_received_raw(self, frame_data):
+        """Pass sync tuple (logical_time, frame) to viewport."""
+        self.timeline_canvas.update_frame(frame_data)
 
     def _on_aspect_changed(self, aspect_text):
         if aspect_text in self.ASPECT_PRESETS:
@@ -1203,12 +1214,16 @@ class PlayerPanel(QFrame):
             self.render_engine.clear_cache() 
         
         # Clear UI
-        self.timeline_canvas.set_frame(None)
         self._update_timecode_label()
         self.scrubber.setValue(0)
         self.btn_play.setIcon(qta.icon('mdi6.play', color='#e66b2c'))
         
-        print("PlayerPanel: Reset for new project.")
+        # AGGRESSIVE PRIMING: Ensure decoders are woken up and frame 0 is rendered
+        # We request multiple times to handle async decoder initialization
+        for delay in [200, 600, 1200]:
+            QTimer.singleShot(delay, lambda: self.render_engine.request_frame(0))
+        
+        hive_logger.info("PlayerPanel: Project loaded. Priming renderer for initial frame.")
 
     def _update_timecode_label(self, preview=False):
         def format_time(val, is_ms=False):
@@ -1237,9 +1252,13 @@ class PlayerPanel(QFrame):
         self.lbl_timecode.setText(f"{p_str} / {d_str}")
 
     def _cleanup(self):
+        hive_logger.info("PlayerPanel: Cleaning up...")
         self.is_playing = False
         self.play_timer.stop()
         
+        if hasattr(self, 'timeline_canvas'):
+            self.timeline_canvas.cleanupGL()
+            
         if hasattr(self, 'render_engine'):
             self.render_engine.stop()
             self.render_engine.wait(300) 

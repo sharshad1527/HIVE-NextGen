@@ -25,6 +25,7 @@ except ImportError:
 
 class RenderEngine(QThread):
     frame_ready = Signal(QImage)
+    frame_ready_raw = Signal(object) # Emits (logical_time, np.ndarray)
 
     def __init__(self):
         super().__init__()
@@ -86,8 +87,19 @@ class RenderEngine(QThread):
             if playing or force:
                 result = self._composite_frame(current_logical)
                 if result:
-                    frame, active_file_paths, pending = result
-                    self.frame_ready.emit(frame)
+                    canvas, active_file_paths, pending = result
+                    
+                    # 1. Emit legacy QImage (for UI/Thumbnails if needed)
+                    self.frame_ready.emit(canvas)
+                    
+                    # 2. Emit raw Numpy RGBA for OpenGL Viewport
+                    rgba_canvas = canvas.convertToFormat(QImage.Format_RGBA8888)
+                    ptr = rgba_canvas.bits()
+                    arr = np.frombuffer(ptr, np.uint8).reshape((rgba_canvas.height(), rgba_canvas.width(), 4))
+                    raw_frame = arr.copy()
+                    
+                    # Emit tuple (logical_time, frame) for frame-accurate handle sync
+                    self.frame_ready_raw.emit((current_logical, raw_frame))
                     
                     if playing:
                         if not hasattr(self, '_frame_count'): self._frame_count = 0
@@ -108,6 +120,7 @@ class RenderEngine(QThread):
             elapsed = time.time() - start_time
             sleep_time = max(0, (1.0 / self._target_fps) - elapsed)
             time.sleep(sleep_time if playing else 0.016)
+
 
     def _get_effective_clip(self, clip):
         if not getattr(self, "preview_preset", None): return clip
