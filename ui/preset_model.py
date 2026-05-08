@@ -1,8 +1,9 @@
-from PySide6.QtCore import QAbstractListModel, Qt, QModelIndex, Signal
+from PySide6.QtCore import QAbstractListModel, Qt, QModelIndex, Signal, QMimeData
 from core.cloud_client import cloud_client
 from core.preset_loader import get_presets
 import os
 import time
+import json
 
 class PresetModel(QAbstractListModel):
     """
@@ -149,3 +150,33 @@ class PresetModel(QAbstractListModel):
 
     def get_download_time(self, item_id):
         return self._newly_downloaded.get(item_id, 0)
+
+    def flags(self, index):
+        if not index.isValid():
+            return Qt.ItemIsEnabled
+        return Qt.ItemIsSelectable | Qt.ItemIsEnabled | Qt.ItemIsDragEnabled
+
+    def mimeTypes(self):
+        return ["application/x-have-item"]
+
+    def mimeData(self, indexes):
+        mime_data = QMimeData()
+        items_data = []
+        for index in indexes:
+            if index.isValid():
+                data = {
+                    "title": index.data(self.NameRole),
+                    "type": index.data(self.TypeRole),
+                    "subtype": index.data(self.SubtypeRole),
+                    "file_path": index.data(self.PathRole),
+                    "thumbnail": index.data(self.ThumbRole),
+                    "preset_properties": index.data(self.PropertiesRole)
+                }
+                items_data.append(data)
+        
+        if len(items_data) == 1:
+            mime_data.setData("application/x-have-item", json.dumps(items_data[0]).encode('utf-8'))
+        elif len(items_data) > 1:
+            mime_data.setData("application/x-have-item", json.dumps({"batch": items_data}).encode('utf-8'))
+            
+        return mime_data

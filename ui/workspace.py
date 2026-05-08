@@ -1183,6 +1183,9 @@ class WorkspacePanel(QFrame):
         view.setMovement(QListView.Static)
         view.setSpacing(10)
         view.setWordWrap(True)
+        view.setDragEnabled(True)
+        view.setDragDropMode(QListView.DragOnly)
+        view.setDefaultDropAction(Qt.CopyAction)
         view.setStyleSheet("""
             QListView { border: none; background: transparent; }
             QScrollBar:vertical { background: transparent; width: 6px; margin: 0px; }
