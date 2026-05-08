@@ -1,0 +1,11 @@
+PySide6
+av
+numpy
+msgpack
+requests
+scipy
+soundfile
+sounddevice
+qtawesome
+psutil
+opencv-python
