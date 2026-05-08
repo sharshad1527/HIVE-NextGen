@@ -29,7 +29,7 @@ Establish the high-performance OpenGL foundation by implementing a central Shade
 ### 2.3 PBO Integration
 - Refactor `RenderEngine` to provide raw Numpy RGBA buffers.
 - Implement the "Triple Buffer" PBO upload logic in `HiveViewport`.
-- **Verification:** Run `Project-05-06` and verify video frames appear on the new viewport with 0% CPU conversion overhead.
+- **Verification:** Run `Project-05-08` and verify video frames appear on the new viewport with 0% CPU conversion overhead.
 
 ## 🧪 Testing Protocol
 - **Performance Test:** `tests/test_pbo_speed.py` - Compare `glTexSubImage2D` vs PBO upload times.

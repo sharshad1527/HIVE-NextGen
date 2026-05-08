@@ -7,7 +7,7 @@ My goal is to finalize the GPU pipeline with transitions and hybrid caption rend
 - **THINKING & CODING:** I will use the **PRO MODEL**.
 - **SIMPLE TASKS:** I will use Flash/Lite models.
 - **LOGGING:** I will log composition times and peak memory usage to `hive_logger`.
-- **COMPATIBILITY:** I will verify that `Project-05-06` plays perfectly with all features enabled.
+- **COMPATIBILITY:** I will verify that `Project-05-08` plays perfectly with all features enabled.
 
 I will start by implementing the `master_transition.glsl` shader.
 

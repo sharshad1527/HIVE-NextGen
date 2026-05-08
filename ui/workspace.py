@@ -1135,7 +1135,10 @@ class WorkspacePanel(QFrame):
                 card.update_proxy_progress(100)
 
     def _create_preset_tab(self, category, default_icon, placeholders):
-        from core.preset_loader import get_presets
+        from ui.preset_model import PresetModel
+        from ui.preset_delegate import PresetDelegate
+        from PySide6.QtWidgets import QListView
+        from PySide6.QtCore import QSortFilterProxyModel
         
         widget = QWidget()
         layout = QVBoxLayout(widget)
@@ -1158,55 +1161,70 @@ class WorkspacePanel(QFrame):
         top_layout.addWidget(filter_combo)
         layout.addLayout(top_layout)
 
-        scroll, grid = self._create_grid_scroll()
-        
-        item_type_map = { "Captions": "caption", "Effects": "effect", "Transitions": "transition" }
+        # 1. Setup Model and Proxy for Filtering
         category_folder_map = { "Captions": "captions", "Effects": "effects", "Transitions": "transitions" }
-        item_type = item_type_map.get(category, "preset")
         folder_name = category_folder_map.get(category, category.lower())
-
-        presets = get_presets(folder_name)
         
-        if not presets:
-            presets = [{"name": name, "icon": default_icon, "properties": {}} for name in placeholders]
+        source_model = PresetModel(folder_name)
+        source_model.refresh()
+        
+        proxy_model = QSortFilterProxyModel()
+        proxy_model.setSourceModel(source_model)
+        proxy_model.setFilterCaseSensitivity(Qt.CaseInsensitive)
+        proxy_model.setFilterRole(PresetModel.NameRole)
+        
+        search.textChanged.connect(proxy_model.setFilterFixedString)
 
-        col_count = 2
-        all_cards = []
-        for i, preset in enumerate(presets):
-            row = i // col_count
-            col = i % col_count
-            preset_name = preset.get("name", "Unnamed")
-            preset_icon = preset.get("icon", default_icon)
+        # 2. Setup ListView
+        view = QListView()
+        view.setModel(proxy_model)
+        view.setViewMode(QListView.IconMode)
+        view.setResizeMode(QListView.Adjust)
+        view.setMovement(QListView.Static)
+        view.setSpacing(10)
+        view.setWordWrap(True)
+        view.setStyleSheet("""
+            QListView { border: none; background: transparent; }
+            QScrollBar:vertical { background: transparent; width: 6px; margin: 0px; }
+            QScrollBar::handle:vertical { background: #333; border-radius: 3px; }
+            QScrollBar::handle:vertical:hover { background: #555; }
+        """)
+        
+        # 3. Setup Delegate
+        delegate = PresetDelegate(view)
+        view.setItemDelegate(delegate)
+        
+        # 4. Connect Signals
+        delegate.add_requested.connect(lambda row: self._on_preset_add_requested(proxy_model, row))
+        delegate.download_requested.connect(lambda row: source_model.start_download(row)) # Note: should handle proxy mapping if needed
+        
+        # Fix download mapping (proxy to source)
+        def handle_download(proxy_row):
+            source_idx = proxy_model.mapToSource(proxy_model.index(proxy_row, 0))
+            source_model.start_download(source_idx.row())
             
-            card = DraggableCard(preset_name, preset_icon, item_type, preset_name)
-            card._preset_properties = preset.get("properties", {})
-            
-            original_get_data = card.get_data
-            def make_enhanced_get_data(orig, props):
-                def enhanced_get_data():
-                    data = orig()
-                    data["preset_properties"] = props
-                    return data
-                return enhanced_get_data
-            card.get_data = make_enhanced_get_data(original_get_data, card._preset_properties)
-            
-            card.add_requested.connect(self.add_item_to_timeline.emit)
-            card.preview_requested.connect(self.preview_requested.emit)
-            grid.addWidget(card, row, col)
-            all_cards.append(card)
+        delegate.download_requested.disconnect()
+        delegate.download_requested.connect(handle_download)
 
-        def filter_presets(text):
-            text_lower = text.lower()
-            row_idx, col_idx = 0, 0
-            for card in all_cards:
-                matches = text_lower in card.title.lower() if text_lower else True
-                card.setVisible(matches)
-                if matches:
-                    grid.removeWidget(card)
-                    grid.addWidget(card, row_idx // col_count, row_idx % col_count)
-                    row_idx += 1
-                    
-        search.textChanged.connect(filter_presets)
-
-        layout.addWidget(scroll)
+        layout.addWidget(view)
+        
+        # Trigger catalog check
+        from core.cloud_client import cloud_client
+        cloud_client.check_and_update_catalog()
+        
         return widget
+
+    def _on_preset_add_requested(self, model, row):
+        # Extract data from model and emit add_item_to_timeline
+        idx = model.index(row, 0)
+        from ui.preset_model import PresetModel
+        
+        data = {
+            "title": idx.data(PresetModel.NameRole),
+            "type": idx.data(PresetModel.TypeRole),
+            "subtype": idx.data(PresetModel.SubtypeRole),
+            "file_path": idx.data(PresetModel.PathRole),
+            "thumbnail": idx.data(PresetModel.ThumbRole),
+            "preset_properties": idx.data(PresetModel.PropertiesRole)
+        }
+        self.add_item_to_timeline.emit(data)

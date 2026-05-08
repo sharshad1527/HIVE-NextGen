@@ -39,7 +39,7 @@ Implement a professional, on-demand preset delivery system with a virtualized UI
 ## 🧪 Testing Protocol
 - **Unit Test:** `tests/test_cloud_client.py` - Verify conditional fetch logic.
 - **Performance Test:** `tests/test_virtual_list.py` - Measure FPS during rapid scrolling of 10,000 items.
-- **Manual Test:** Use `Project-05-06`. Open the Effects tab, refresh catalog, download a new effect, and apply it.
+- **Manual Test:** Use `Project-05-08`. Open the Effects tab, refresh catalog, download a new effect, and apply it.
 
 ## 🤖 Agent Instructions
 - **THINKING & CODING:** Use **PRO MODEL**.

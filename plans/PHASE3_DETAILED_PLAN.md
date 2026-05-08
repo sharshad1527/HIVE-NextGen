@@ -5,12 +5,12 @@ This is the master index for the GPU migration and Cloud Store integration. The 
 ## 🗺 Phase 3 Roadmap
 
 ### 1. [Cloud Store & UI Virtualization](phase3/sub_phase_1.md)
-- **Status:** Ready
+- **Status:** Completed ✅
 - **Goal:** On-demand fetching, conditional catalog updates, and high-performance UI list virtualization.
 - **Start Prompt:** [START_PROMPT_PHASE_3_1.md](phase3/START_PROMPT_PHASE_3_1.md)
 
 ### 2. [Shader Manager & Viewport Core](phase3/sub_phase_2.md)
-- **Status:** Pending
+- **Status:** Ready 🚀
 - **Goal:** OpenGL 3.3 Core foundation, PBO async uploads, and hot-reloading Shader Manager.
 - **Start Prompt:** [START_PROMPT_PHASE_3_2.md](phase3/START_PROMPT_PHASE_3_2.md)
 
@@ -32,4 +32,4 @@ This is the master index for the GPU migration and Cloud Store integration. The 
     - **Flash/Lite Models** for boilerplate, research, and simple tool tasks.
 - **Sub-Agents:** Use `codebase_investigator` for deep mapping and `generalist` for batch operations.
 - **Logging:** Mandatory `hive_logger` debug logs for all new logic (Network, GL, Model updates).
-- **Validation:** Every phase must be verified with a dedicated test script and manual playback using `Project-05-06`.
+- **Validation:** Every phase must be verified with a dedicated test script and manual playback using `Project-05-08`.

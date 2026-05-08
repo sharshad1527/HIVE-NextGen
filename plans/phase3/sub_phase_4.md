@@ -22,7 +22,7 @@ Finalize the GPU pipeline by implementing transitions and high-quality caption r
 - Refactor `RenderEngine._draw_caption` to output a `QImage`.
 - Upload this `QImage` to the viewport as a separate texture layer.
 - Apply GLSL animations (Typewriter reveal, Glow) to the caption texture.
-- **Verification:** Add a caption to `Project-05-06` and verify smooth animation.
+- **Verification:** Add a caption to `Project-05-08` and verify smooth animation.
 
 ### 4.3 Final Polishing & Gamma
 - Implement the shared `gamma_correct.glsl` include.

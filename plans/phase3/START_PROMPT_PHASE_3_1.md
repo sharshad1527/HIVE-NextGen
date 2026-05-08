@@ -7,7 +7,7 @@ My goal is to implement the conditional catalog fetching, async cloud client, an
 - **THINKING & CODING:** I will use the **PRO MODEL**.
 - **SIMPLE TASKS:** I will use Flash/Lite models.
 - **LOGGING:** I will ensure all network and UI model updates have debug logs using `hive_logger`.
-- **COMPATIBILITY:** I will verify everything works with `Project-05-06`.
+- **COMPATIBILITY:** I will verify everything works with `Project-05-08`.
 
 I will start by implementing the `CloudStoreClient` in `core/cloud_client.py` with the conditional fetch logic.
 
