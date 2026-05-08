@@ -238,33 +238,27 @@ class HiveViewport(QOpenGLWidget):
                     scale_y = aspect_view / aspect_frame
                     proj.scale(1.0, scale_y, 1.0)
 
-            # Set Uniforms
-            proj_loc = self.sm.get_uniform_location("master", "uProjection")
-            program.setUniformValue(proj_loc, proj)
+            # Set Standard Global Uniforms
+            program.setUniformValue(self.sm.get_uniform_location("master", "uProjection"), proj)
+            program.setUniformValue(self.sm.get_uniform_location("master", "opacity"), 1.0)
+            program.setUniformValue(self.sm.get_uniform_location("master", "screenTexture"), 0)
+            program.setUniformValue(self.sm.get_uniform_location("master", "uResolution"), float(self.frame_width), float(self.frame_height))
+            program.setUniformValue(self.sm.get_uniform_location("master", "uTime"), float(self.last_frame_time))
 
-            opacity_loc = self.sm.get_uniform_location("master", "opacity")
-            program.setUniformValue(opacity_loc, 1.0)
-            
-            tex_loc = self.sm.get_uniform_location("master", "screenTexture")
-            program.setUniformValue(tex_loc, 0)
-
-            # Set Effect Uniforms
+            # DYNAMIC UNIFORM INJECTION
+            # We loop through all provided effect data. If a key starts with 'e_',
+            # we automatically try to find a matching uniform in the shader.
             eff = self.current_effect_data
             if eff:
-                program.setUniformValue(self.sm.get_uniform_location("master", "uEffectType"), int(eff.get("type", 0)))
-                program.setUniformValue(self.sm.get_uniform_location("master", "uAmount"), float(eff.get("amount", 1.0)))
-                program.setUniformValue(self.sm.get_uniform_location("master", "uRadius"), float(eff.get("radius", 1.0)))
-                program.setUniformValue(self.sm.get_uniform_location("master", "uBrightness"), float(eff.get("brightness", 0.0)))
-                program.setUniformValue(self.sm.get_uniform_location("master", "uContrast"), float(eff.get("contrast", 0.0)))
-                program.setUniformValue(self.sm.get_uniform_location("master", "uSaturation"), float(eff.get("saturation", 0.0)))
-                program.setUniformValue(self.sm.get_uniform_location("master", "uNoise"), float(eff.get("noise", 0.0)))
-                program.setUniformValue(self.sm.get_uniform_location("master", "uShift"), float(eff.get("shift", 0.0)))
-                
-                res_loc = self.sm.get_uniform_location("master", "uResolution")
-                program.setUniformValue(res_loc, float(self.frame_width), float(self.frame_height))
-                
-                time_loc = self.sm.get_uniform_location("master", "uTime")
-                program.setUniformValue(time_loc, float(self.last_frame_time))
+                for key, val in eff.items():
+                    if key.startswith("e_"):
+                        loc = self.sm.get_uniform_location("master", key)
+                        if loc != -1:
+                            # Handle both int and float values safely
+                            if isinstance(val, int):
+                                program.setUniformValue(loc, int(val))
+                            else:
+                                program.setUniformValue(loc, float(val))
 
             # Bind Texture
             glActiveTexture(GL_TEXTURE0)

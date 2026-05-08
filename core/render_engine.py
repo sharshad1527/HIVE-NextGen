@@ -206,28 +206,25 @@ class RenderEngine(QThread):
             else: frame_array = reader_data["lkgf"]
 
             if frame_array is not None:
-                # GPU EFFECT EXTRACTION
+                # DYNAMIC GPU PARAMETER MAPPING
+                # We collect ALL properties from the JSON and animate them if needed.
+                # This makes the engine 'Data-Blind' and expandable via JSON.
                 rel_t = max(0.0, (current_ms - clip.start_time) / 10.0)
-                fxs = clip.applied_effects.get("applied_effects", [])
-                if fxs:
-                    fx = (fxs if isinstance(fxs, list) else [fxs])[0].lower()
-                    amt = (clip.get_animated_value("effect_amount", rel_t, 100) if hasattr(clip, 'get_animated_value') else 100) / 100.0
-                    
-                    if "blur" in fx: 
-                        effect_data.update({"type": 1, "amount": amt, "radius": clip.get_animated_value("radius", rel_t, 15) if hasattr(clip, 'get_animated_value') else 15})
-                    elif "glow" in fx: 
-                        effect_data.update({"type": 2, "amount": amt, "radius": clip.get_animated_value("radius", rel_t, 30) if hasattr(clip, 'get_animated_value') else 30})
-                    elif "vignette" in fx: 
-                        effect_data.update({"type": 3, "amount": amt, "radius": (clip.get_animated_value("radius", rel_t, 70) if hasattr(clip, 'get_animated_value') else 70)/100.0})
-                    elif "color" in fx:
-                        br, co, sa = [ (clip.get_animated_value(k, rel_t, d) if hasattr(clip, 'get_animated_value') else d) for k,d in [("brightness",0),("contrast",10),("saturation",15)]]
-                        effect_data.update({"type": 4, "amount": amt, "brightness": br/255.0, "contrast": co/255.0, "saturation": sa/100.0})
-                    elif "vhs" in fx:
-                        effect_data.update({"type": 5, "amount": amt, "noise": (clip.get_animated_value("noise", rel_t, 30) if hasattr(clip, 'get_animated_value') else 30)/100.0, "shift": clip.get_animated_value("chromatic_shift", rel_t, 5) if hasattr(clip, 'get_animated_value') else 5})
-                    elif "glitch" in fx:
-                        effect_data.update({"type": 6, "amount": amt})
+                
+                # 1. Start with static properties from the preset
+                if isinstance(clip.applied_effects, dict):
+                    effect_data.update(clip.applied_effects)
+                
+                # 2. Layer on animated values for keys that support them
+                # We look for any property starting with 'e_' (effect) or other standard uniforms
+                all_keys = list(effect_data.keys())
+                for key in all_keys:
+                    if hasattr(clip, 'get_animated_value'):
+                        # If a keyframe exists for this property, use it. Otherwise keep static.
+                        val = clip.get_animated_value(key, rel_t, effect_data[key])
+                        effect_data[key] = val
 
-                # Legacy QImage for UI (No effects applied here, GPU will do it)
+                # Legacy QImage for UI
                 qimg = QImage(frame_array.data, frame_array.shape[1], frame_array.shape[0], frame_array.shape[2]*frame_array.shape[1], QImage.Format_RGBA8888).copy()
                 
         elif clip.clip_type == "image":
