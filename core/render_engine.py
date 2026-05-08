@@ -25,7 +25,7 @@ except ImportError:
 
 class RenderEngine(QThread):
     frame_ready = Signal(QImage)
-    frame_ready_raw = Signal(object) # Emits (logical_time, np.ndarray)
+    frame_ready_raw = Signal(object) # Emits (logical_time, np.ndarray, dict_effect_data)
 
     def __init__(self):
         super().__init__()
@@ -85,21 +85,28 @@ class RenderEngine(QThread):
                 self._force_render = False
 
             if playing or force:
-                result = self._composite_frame(current_logical)
-                if result:
-                    canvas, active_file_paths, pending = result
-                    
-                    # 1. Emit legacy QImage (for UI/Thumbnails if needed)
-                    self.frame_ready.emit(canvas)
-                    
-                    # 2. Emit raw Numpy RGBA for OpenGL Viewport
-                    rgba_canvas = canvas.convertToFormat(QImage.Format_RGBA8888)
-                    ptr = rgba_canvas.bits()
-                    arr = np.frombuffer(ptr, np.uint8).reshape((rgba_canvas.height(), rgba_canvas.width(), 4))
-                    raw_frame = arr.copy()
-                    
-                    # Emit tuple (logical_time, frame) for frame-accurate handle sync
-                    self.frame_ready_raw.emit((current_logical, raw_frame))
+                try:
+                    result = self._composite_frame(current_logical)
+                    if result:
+                        canvas, active_file_paths, pending, effect_data = result
+                        
+                        # Emit legacy QImage
+                        self.frame_ready.emit(canvas)
+                        
+                        # Raw Numpy RGBA for OpenGL Viewport
+                        rgba_canvas = canvas.convertToFormat(QImage.Format_RGBA8888)
+                        
+                        # SAFE BYTE EXTRACTION: Ensure we don't crash on buffer protocol issues
+                        ptr = rgba_canvas.bits()
+                        size = rgba_canvas.sizeInBytes()
+                        arr = np.frombuffer(ptr, np.uint8, count=size).reshape((rgba_canvas.height(), rgba_canvas.width(), 4))
+                        raw_frame = arr.copy()
+                        
+                        self.frame_ready_raw.emit((current_logical, raw_frame, effect_data))
+                except Exception as e:
+                    hive_logger.error(f"RenderEngine: Critical Loop Error: {e}")
+                    import traceback
+                    hive_logger.error(traceback.format_exc())
                     
                     if playing:
                         if not hasattr(self, '_frame_count'): self._frame_count = 0
@@ -143,14 +150,13 @@ class RenderEngine(QThread):
         file_path = clip.file_path
         if clip.clip_type == "video" and app_config.get_setting("auto_proxies", True):
             if clip.proxy_path and os.path.exists(clip.proxy_path): file_path = clip.proxy_path
-        if not os.path.exists(file_path): return False, None
+        if not os.path.exists(file_path): return False, None, {}
 
         qimg = None
         pending_seek = False
+        effect_data = {"type": 0}
+        
         if clip.clip_type == "video":
-            # SHARED RESOURCE OPTIMIZATION: Use file_path as key instead of clip_id.
-            # This ensures that multiple clips referencing the same file share a single 
-            # VideoDecoder and its 1GB FrameCache, drastically reducing memory usage.
             reader_key = file_path 
             if reader_key not in self.video_readers:
                 decoder = VideoDecoder(file_path)
@@ -168,10 +174,8 @@ class RenderEngine(QThread):
             
             seek_threshold = 1000 if self.is_playing else 100
             
-            # If we are seeking or far away from current frame
             if not self.is_playing or diff > seek_threshold:
                 target_pos = local_ms / 10.0
-                # Seek Storm Fix: Allow 50ms (500ms) drift during playback to let decoder breathe
                 seek_drift = 50.0 if self.is_playing else 0.1
                 
                 if abs(target_pos - reader_data.get("last_seek_pos", -1)) > seek_drift:
@@ -179,21 +183,20 @@ class RenderEngine(QThread):
                     reader_data["last_seek_pos"] = target_pos
                 
                 try:
-                    # Balanced wait: 33ms (one frame at 30fps)
-                    logical_pos, f = decoder.frame_queue.get(timeout=0.033)
+                    # Balanced wait: 33ms during playback, but up to 500ms for static seeks to prevent black frames
+                    logical_pos, f = decoder.frame_queue.get(timeout=0.033 if self.is_playing else 0.5)
                     frame_ms = logical_pos * 10.0
-                    if abs(frame_ms - local_ms) < 500: # Generous window for seeks
+                    if abs(frame_ms - local_ms) < 500:
                         frame_array, reader_data["last_ms"] = f, frame_ms
                 except queue.Empty:
                     if not self.is_playing:
                         pending_seek = True
             else:
-                # Normal playback: Drain queue to catch up
                 while not decoder.frame_queue.empty():
                     try:
                         logical_pos, f = decoder.frame_queue.get_nowait()
                         frame_ms = logical_pos * 10.0
-                        if frame_ms >= local_ms - 33: # Approx 1 frame window at 30fps
+                        if frame_ms >= local_ms - 33:
                             frame_array, reader_data["last_ms"] = f, frame_ms
                             break
                     except queue.Empty:
@@ -203,24 +206,40 @@ class RenderEngine(QThread):
             else: frame_array = reader_data["lkgf"]
 
             if frame_array is not None:
-                # Phase 3 Prep: VideoDecoder now outputs RGBA. 
-                # We convert to BGRA for legacy OpenCV effects, then back to RGBA for display.
-                bgra = cv2.cvtColor(frame_array, cv2.COLOR_RGBA2BGRA)
-                processed = self._apply_cv_effects(bgra, clip, current_ms, has_alpha=True)
-                
-                rgba = cv2.cvtColor(processed, cv2.COLOR_BGRA2RGBA)
-                qimg = QImage(rgba.data, rgba.shape[1], rgba.shape[0], rgba.shape[2]*rgba.shape[1], QImage.Format_RGBA8888).copy()
+                # GPU EFFECT EXTRACTION
+                rel_t = max(0.0, (current_ms - clip.start_time) / 10.0)
+                fxs = clip.applied_effects.get("applied_effects", [])
+                if fxs:
+                    fx = (fxs if isinstance(fxs, list) else [fxs])[0].lower()
+                    amt = (clip.get_animated_value("effect_amount", rel_t, 100) if hasattr(clip, 'get_animated_value') else 100) / 100.0
+                    
+                    if "blur" in fx: 
+                        effect_data.update({"type": 1, "amount": amt, "radius": clip.get_animated_value("radius", rel_t, 15) if hasattr(clip, 'get_animated_value') else 15})
+                    elif "glow" in fx: 
+                        effect_data.update({"type": 2, "amount": amt, "radius": clip.get_animated_value("radius", rel_t, 30) if hasattr(clip, 'get_animated_value') else 30})
+                    elif "vignette" in fx: 
+                        effect_data.update({"type": 3, "amount": amt, "radius": (clip.get_animated_value("radius", rel_t, 70) if hasattr(clip, 'get_animated_value') else 70)/100.0})
+                    elif "color" in fx:
+                        br, co, sa = [ (clip.get_animated_value(k, rel_t, d) if hasattr(clip, 'get_animated_value') else d) for k,d in [("brightness",0),("contrast",10),("saturation",15)]]
+                        effect_data.update({"type": 4, "amount": amt, "brightness": br/255.0, "contrast": co/255.0, "saturation": sa/100.0})
+                    elif "vhs" in fx:
+                        effect_data.update({"type": 5, "amount": amt, "noise": (clip.get_animated_value("noise", rel_t, 30) if hasattr(clip, 'get_animated_value') else 30)/100.0, "shift": clip.get_animated_value("chromatic_shift", rel_t, 5) if hasattr(clip, 'get_animated_value') else 5})
+                    elif "glitch" in fx:
+                        effect_data.update({"type": 6, "amount": amt})
+
+                # Legacy QImage for UI (No effects applied here, GPU will do it)
+                qimg = QImage(frame_array.data, frame_array.shape[1], frame_array.shape[0], frame_array.shape[2]*frame_array.shape[1], QImage.Format_RGBA8888).copy()
                 
         elif clip.clip_type == "image":
             img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
             if img is not None:
                 if len(img.shape) == 3 and img.shape[2] == 4:
-                    img = self._apply_cv_effects(img, clip, current_ms, True)
-                    qimg = QImage(cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA).data, img.shape[1], img.shape[0], 4*img.shape[1], QImage.Format_RGBA8888).copy()
+                    rgba = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
+                    qimg = QImage(rgba.data, rgba.shape[1], rgba.shape[0], 4*rgba.shape[1], QImage.Format_RGBA8888).copy()
                 else:
                     if len(img.shape) == 2: img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-                    img = self._apply_cv_effects(img, clip, current_ms)
-                    qimg = QImage(cv2.cvtColor(img, cv2.COLOR_BGR2RGB).data, img.shape[1], img.shape[0], 3*img.shape[1], QImage.Format_RGB888).copy()
+                    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    qimg = QImage(rgb.data, rgb.shape[1], rgb.shape[0], 3*rgb.shape[1], QImage.Format_RGB888).copy()
 
         if qimg and not qimg.isNull():
             props = clip.applied_effects or {}
@@ -246,10 +265,10 @@ class RenderEngine(QThread):
             painter.drawImage(QRectF(-dw/2, -dh/2, dw, dh), qimg, source_rect)
             painter.restore()
             
-        return pending_seek, file_path
+        return pending_seek, file_path, effect_data
 
     def _composite_frame(self, logical_time):
-        if not CV2_AVAILABLE: return self._create_error_frame("OpenCV Missing"), set(), False
+        if not CV2_AVAILABLE: return self._create_error_frame("OpenCV Missing"), set(), False, {}
         project = project_manager.current_project
         if not project: return None
         proj_w, proj_h = project.resolution
@@ -259,87 +278,20 @@ class RenderEngine(QThread):
         painter.setRenderHint(QPainter.Antialiasing, self._render_scale >= 1.0)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, self._render_scale >= 1.0)
         painter.scale(self._render_scale, self._render_scale)
-        current_ms, active_file_paths, total_pending = int(logical_time * 10), set(), False
+        current_ms, active_file_paths, total_pending, final_effect_data = int(logical_time * 10), set(), False, {"type": 0}
         for track in reversed(project.tracks):
             if track.is_hidden: continue
             for original in track.clips:
                 clip = self._get_effective_clip(original)
                 if clip.start_time <= current_ms < clip.end_time:
                     if clip.clip_type in ["video", "image"]: 
-                        pending, active_path = self._draw_media(painter, clip, current_ms, proj_w, proj_h)
+                        pending, active_path, eff = self._draw_media(painter, clip, current_ms, proj_w, proj_h)
                         if pending: total_pending = True
                         if active_path and clip.clip_type == "video": active_file_paths.add(active_path)
+                        if eff.get("type", 0) != 0: final_effect_data = eff
                     elif clip.clip_type == "caption": self._draw_caption(painter, clip, current_ms, proj_w, proj_h)
         painter.end()
-        return canvas, active_file_paths, total_pending
-
-    def _apply_cv_effects(self, frame, clip, current_ms=0, has_alpha=False):
-        if not isinstance(clip.applied_effects, dict): return frame
-        rel_t = max(0.0, (current_ms - clip.start_time) / 10.0)
-        fxs = clip.applied_effects.get("applied_effects", [])
-        if not fxs: return frame
-        amt = (clip.get_animated_value("effect_amount", rel_t, 100) if hasattr(clip, 'get_animated_value') else 100) / 100.0
-        for fx in (fxs if isinstance(fxs, list) else [fxs]):
-            fxl = fx.lower()
-            if "blur" in fxl: frame = self._fx_blur(frame, amt, clip.applied_effects, clip, rel_t)
-            elif "glow" in fxl: frame = self._fx_glow(frame, amt, clip.applied_effects, clip, rel_t)
-            elif "vignette" in fxl: frame = self._fx_vignette(frame, amt, clip.applied_effects, clip, rel_t)
-            elif "color" in fxl: frame = self._fx_color_grade(frame, amt, clip.applied_effects, clip, rel_t)
-            elif "vhs" in fxl: frame = self._fx_vhs(frame, amt, clip.applied_effects, clip, rel_t)
-            elif "glitch" in fxl: frame = self._fx_glitch(frame, amt, clip.applied_effects, clip, rel_t)
-        return frame
-
-    def _fx_blur(self, f, a, p, c, t):
-        r = int((c.get_animated_value("radius", t, 15) if hasattr(c, 'get_animated_value') else 15) * a)
-        if r < 1: return f
-        return cv2.GaussianBlur(f, (r|1, r|1), 0)
-
-    def _fx_glow(self, f, a, p, c, t):
-        r = int((c.get_animated_value("radius", t, 30) if hasattr(c, 'get_animated_value') else 30) * a)
-        if r < 1: return f
-        w = f[:,:,:3] if f.shape[2]>=3 else f
-        res = cv2.addWeighted(w, 1.0, cv2.GaussianBlur(w, (r|1, r|1), 0), a*0.5, 0)
-        if f.shape[2]==4: f[:,:,:3]=res; return f
-        return res
-
-    def _fx_vignette(self, f, a, p, c, t):
-        h, w = f.shape[:2]
-        rp = (c.get_animated_value("radius", t, 70) if hasattr(c, 'get_animated_value') else 70)/100.0
-        Y, X = np.ogrid[:h, :w]
-        mask = np.clip(1.0 - np.sqrt((X-w/2)**2 + (Y-h/2)**2) / (np.sqrt((w/2)**2 + (h/2)**2) * max(0.1, rp)), 0, 1)
-        return (f.astype(np.float32) * np.dstack([1.0 - (1.0 - mask) * a]*f.shape[2])).astype(np.uint8)
-
-    def _fx_color_grade(self, f, a, p, c, t):
-        br, co, sa = [ (c.get_animated_value(k, t, d) if hasattr(c, 'get_animated_value') else d) * a for k,d in [("brightness",0),("contrast",10),("saturation",15)]]
-        w = f[:,:,:3].astype(np.float32); w += br
-        fct = (259*(co+255))/(255*(259-co)); w = fct*(w-128)+128
-        if abs(sa) > 0.1:
-            hsv = cv2.cvtColor(np.clip(w,0,255).astype(np.uint8), cv2.COLOR_BGR2HSV).astype(np.float32)
-            hsv[:,:,1] = np.clip(hsv[:,:,1]*(1+sa/100),0,255)
-            w = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR).astype(np.float32)
-        res = np.clip(w,0,255).astype(np.uint8)
-        if f.shape[2]==4: f[:,:,:3]=res; return f
-        return res
-
-    def _fx_vhs(self, f, a, p, c, t):
-        h, w = f.shape[:2]; res = (f[:,:,:3] if f.shape[2]>=3 else f).copy()
-        sh = int((c.get_animated_value("chromatic_shift", t, 5) if hasattr(c, 'get_animated_value') else 5)*a)
-        if sh > 0: res[:,sh:,2] = f[:,:-sh,2]; res[:,:-sh,0] = f[:,sh:,0]
-        n = (c.get_animated_value("noise", t, 30) if hasattr(c, 'get_animated_value') else 30)/100*a
-        if n > 0: res = np.clip(res.astype(np.int16)+(np.random.randint(-25,25,res.shape)*n).astype(np.int16),0,255).astype(np.uint8)
-        if f.shape[2]==4: f[:,:,:3]=res; return f
-        return res
-
-    def _fx_glitch(self, f, a, p, c, t):
-        h, w = f.shape[:2]; res = f.copy()
-        sa = int((c.get_animated_value("shift_amount", t, 20) if hasattr(c, 'get_animated_value') else 20)*a)
-        bs = max(2, int(c.get_animated_value("block_size", t, 10) if hasattr(c, 'get_animated_value') else 10))
-        if sa < 1: return f
-        for _ in range(max(1, int(h/bs*a*0.3))):
-            y, s = random.randint(0, max(0, h-bs)), random.randint(-sa, sa)
-            if s > 0: res[y:y+bs, s:] = f[y:y+bs, :w-s]
-            elif s < 0: res[y:y+bs, :w+s] = f[y:y+bs, -s:]
-        return res
+        return canvas, active_file_paths, total_pending, final_effect_data
 
     def _draw_caption(self, painter, clip, current_ms, proj_w, proj_h):
         p = clip.applied_effects or {}

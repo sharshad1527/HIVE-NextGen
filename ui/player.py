@@ -66,11 +66,12 @@ class TimelinePreviewCanvas(HiveViewport):
     
     def paintGL(self):
         """First, render the video frame using OpenGL."""
+        painter = QPainter(self)
+        painter.beginNativePainting()
         super().paintGL()
+        painter.endNativePainting()
         
         # Then, render interactive handles using QPainter on top
-        painter = QPainter(self)
-        
         if self._show_handles and self._selected_clip_id:
             clip = self._get_selected_clip_data()
             if clip and clip.clip_type in ("video", "image", "caption"):

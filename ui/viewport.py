@@ -42,9 +42,11 @@ class HiveViewport(QOpenGLWidget):
         
         # Thread-safe frame storage
         self._next_frame = None
+        self._next_effect_data = {}
         self._frame_lock = threading.Lock()
         
         self.last_frame_time = 0.0 # Logical timestamp of the frame currently on the GPU
+        self.current_effect_data = {}
         
         self.initialized = False
 
@@ -124,30 +126,40 @@ class HiveViewport(QOpenGLWidget):
             hive_logger.error(traceback.format_exc())
 
     def update_frame(self, data):
-        """Thread-safe update of the next frame to be rendered. Accepts (logical_time, frame)."""
+        """Thread-safe update of the next frame to be rendered. Accepts (logical_time, frame, effect_data)."""
         if data is None:
             return
             
-        with self._frame_lock:
-            self._next_frame = data
-        
-        self.update()
+        try:
+            with self._frame_lock:
+                if len(data) == 3:
+                    self._next_frame = (data[0], data[1])
+                    self._next_effect_data = data[2]
+                else:
+                    self._next_frame = data
+                    self._next_effect_data = {"type": 0}
+            
+            self.update()
+        except Exception as e:
+            hive_logger.error(f"HiveViewport: Error in update_frame: {e}")
 
     def _allocate_buffers(self, w, h):
         """Internal: Resize texture and PBOs. MUST be called with valid context."""
         hive_logger.info(f"HiveViewport: Allocating buffers for {w}x{h}")
-        
-        glBindTexture(GL_TEXTURE_2D, self.texture_id)
-        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
-        
-        data_size = w * h * 4
-        for i, pbo_id in enumerate(self.pbo_ids):
-            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo_id)
-            glBufferData(GL_PIXEL_UNPACK_BUFFER, data_size, None, GL_STREAM_DRAW)
-            hive_logger.debug(f"HiveViewport: PBO[{i}] (ID:{pbo_id}) allocated size: {data_size}")
-        
-        glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
-        glBindTexture(GL_TEXTURE_2D, 0)
+        try:
+            glBindTexture(GL_TEXTURE_2D, self.texture_id)
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, None)
+            
+            data_size = w * h * 4
+            for i, pbo_id in enumerate(self.pbo_ids):
+                glBindBuffer(GL_PIXEL_UNPACK_BUFFER, pbo_id)
+                glBufferData(GL_PIXEL_UNPACK_BUFFER, data_size, None, GL_STREAM_DRAW)
+                hive_logger.debug(f"HiveViewport: PBO[{i}] (ID:{pbo_id}) allocated size: {data_size}")
+            
+            glBindBuffer(GL_PIXEL_UNPACK_BUFFER, 0)
+            glBindTexture(GL_TEXTURE_2D, 0)
+        except Exception as e:
+            hive_logger.error(f"HiveViewport: Buffer allocation failed: {e}")
 
     def paintGL(self):
         if not self.initialized:
@@ -155,15 +167,18 @@ class HiveViewport(QOpenGLWidget):
 
         # 1. Process any pending frame updates (PBO Upload)
         frame_data = None
+        effect_data = None
         with self._frame_lock:
             if self._next_frame is not None:
                 frame_data = self._next_frame
+                effect_data = self._next_effect_data
                 self._next_frame = None
                 
         if frame_data is not None:
             try:
                 logical_time, frame = frame_data
                 self.last_frame_time = logical_time
+                self.current_effect_data = effect_data
                 
                 h, w = frame.shape[:2]
                 
@@ -194,55 +209,76 @@ class HiveViewport(QOpenGLWidget):
                 hive_logger.error(f"HiveViewport: Frame upload failed: {e}")
 
         # 2. Render Sequence
-        glClearColor(0.0, 0.0, 0.0, 1.0)
-        glClear(GL_COLOR_BUFFER_BIT)
+        try:
+            glClearColor(0.0, 0.0, 0.0, 1.0)
+            glClear(GL_COLOR_BUFFER_BIT)
 
-        program = self.sm.get_program("master")
-        if not program:
-            return
+            program = self.sm.get_program("master")
+            if not program:
+                return
 
-        program.bind()
-        
-        # Bind VAO first for Core Profile compliance
-        glBindVertexArray(self.vao)
-
-        # Aspect Ratio Correction Matrix
-        proj = QMatrix4x4()
-        if self.frame_width > 0 and self.frame_height > 0:
-            view_w, view_h = self.width(), self.height()
-            aspect_view = view_w / view_h
-            aspect_frame = self.frame_width / self.frame_height
+            program.bind()
             
-            if aspect_view > aspect_frame:
-                # Pillarbox (black bars on sides)
-                scale_x = aspect_frame / aspect_view
-                proj.scale(scale_x, 1.0, 1.0)
-            else:
-                # Letterbox (black bars top/bottom)
-                scale_y = aspect_view / aspect_frame
-                proj.scale(1.0, scale_y, 1.0)
+            # Bind VAO first for Core Profile compliance
+            glBindVertexArray(self.vao)
 
-        # Set Uniforms
-        proj_loc = self.sm.get_uniform_location("master", "uProjection")
-        program.setUniformValue(proj_loc, proj)
+            # Aspect Ratio Correction Matrix
+            proj = QMatrix4x4()
+            if self.frame_width > 0 and self.frame_height > 0:
+                view_w, view_h = self.width(), self.height()
+                aspect_view = view_w / view_h
+                aspect_frame = self.frame_width / self.frame_height
+                
+                if aspect_view > aspect_frame:
+                    # Pillarbox (black bars on sides)
+                    scale_x = aspect_frame / aspect_view
+                    proj.scale(scale_x, 1.0, 1.0)
+                else:
+                    # Letterbox (black bars top/bottom)
+                    scale_y = aspect_view / aspect_frame
+                    proj.scale(1.0, scale_y, 1.0)
 
-        opacity_loc = self.sm.get_uniform_location("master", "opacity")
-        program.setUniformValue(opacity_loc, 1.0)
-        
-        tex_loc = self.sm.get_uniform_location("master", "screenTexture")
-        program.setUniformValue(tex_loc, 0)
+            # Set Uniforms
+            proj_loc = self.sm.get_uniform_location("master", "uProjection")
+            program.setUniformValue(proj_loc, proj)
 
-        # Bind Texture
-        glActiveTexture(GL_TEXTURE0)
-        glBindTexture(GL_TEXTURE_2D, self.texture_id)
+            opacity_loc = self.sm.get_uniform_location("master", "opacity")
+            program.setUniformValue(opacity_loc, 1.0)
+            
+            tex_loc = self.sm.get_uniform_location("master", "screenTexture")
+            program.setUniformValue(tex_loc, 0)
 
-        # Draw
-        glDrawArrays(GL_TRIANGLES, 0, 6)
-        
-        # Cleanup state
-        glBindVertexArray(0)
-        glBindTexture(GL_TEXTURE_2D, self.texture_id) # Unbind but stay on correct unit
-        program.release()
+            # Set Effect Uniforms
+            eff = self.current_effect_data
+            if eff:
+                program.setUniformValue(self.sm.get_uniform_location("master", "uEffectType"), int(eff.get("type", 0)))
+                program.setUniformValue(self.sm.get_uniform_location("master", "uAmount"), float(eff.get("amount", 1.0)))
+                program.setUniformValue(self.sm.get_uniform_location("master", "uRadius"), float(eff.get("radius", 1.0)))
+                program.setUniformValue(self.sm.get_uniform_location("master", "uBrightness"), float(eff.get("brightness", 0.0)))
+                program.setUniformValue(self.sm.get_uniform_location("master", "uContrast"), float(eff.get("contrast", 0.0)))
+                program.setUniformValue(self.sm.get_uniform_location("master", "uSaturation"), float(eff.get("saturation", 0.0)))
+                program.setUniformValue(self.sm.get_uniform_location("master", "uNoise"), float(eff.get("noise", 0.0)))
+                program.setUniformValue(self.sm.get_uniform_location("master", "uShift"), float(eff.get("shift", 0.0)))
+                
+                res_loc = self.sm.get_uniform_location("master", "uResolution")
+                program.setUniformValue(res_loc, float(self.frame_width), float(self.frame_height))
+                
+                time_loc = self.sm.get_uniform_location("master", "uTime")
+                program.setUniformValue(time_loc, float(self.last_frame_time))
+
+            # Bind Texture
+            glActiveTexture(GL_TEXTURE0)
+            glBindTexture(GL_TEXTURE_2D, self.texture_id)
+
+            # Draw
+            glDrawArrays(GL_TRIANGLES, 0, 6)
+            
+            # Cleanup state
+            glBindVertexArray(0)
+            glBindTexture(GL_TEXTURE_2D, 0)
+            program.release()
+        except Exception as e:
+            hive_logger.error(f"HiveViewport: Render sequence failed: {e}")
 
     def resizeGL(self, w, h):
         if self.initialized:
