@@ -255,9 +255,15 @@ DEFAULT_SCHEMAS = {
             ]
         },
         {
+            "section": "Master Control",
+            "controls": [
+                {"key": "effect_amount", "type": "slider", "min": 0, "max": 100, "default": 100, "suffix": "%", "label": "Global Intensity"},
+            ]
+        },
+        {
             "section": "Parameters",
             "controls": [
-                {"key": "intensity", "type": "slider", "min": 0, "max": 100, "default": 100, "suffix": "%", "label": "Intensity"},
+                {"key": "intensity", "type": "slider", "min": 0, "max": 100, "default": 100, "suffix": "%", "label": "Local Intensity"},
                 {"key": "radius", "type": "slider", "min": 0, "max": 200, "default": 50, "suffix": "px", "label": "Radius"},
                 {"key": "color_tint", "type": "color", "default": "#e66b2c", "label": "Color Tint"},
             ]

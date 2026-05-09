@@ -539,14 +539,14 @@ class PropertiesPanel(QFrame):
         
         any_enabled = False
         for c in controls:
-            if c.get("type") in ["slider", "float_spin"]:
+            if c.get("type") in ["slider", "float_spin", "xy", "number"]:
                 prop = c.get("key")
                 if self.current_clip_obj.is_keyframing_enabled(prop):
                     any_enabled = True
                     break
                     
         for c in controls:
-            if c.get("type") in ["slider", "float_spin"]:
+            if c.get("type") in ["slider", "float_spin", "xy", "number"]:
                 prop = c.get("key")
                 if not any_enabled:
                     self.current_clip_obj.toggle_keyframing(prop, True)

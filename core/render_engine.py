@@ -94,12 +94,19 @@ class RenderEngine(QThread):
                         self.frame_ready.emit(canvas)
                         
                         # Raw Numpy RGBA for OpenGL Viewport
-                        rgba_canvas = canvas.convertToFormat(QImage.Format_RGBA8888)
+                        # If canvas is already RGBA8888, we avoid conversion
+                        if canvas.format() == QImage.Format_RGBA8888:
+                            rgba_canvas = canvas
+                        else:
+                            rgba_canvas = canvas.convertToFormat(QImage.Format_RGBA8888)
                         
-                        # SAFE BYTE EXTRACTION: Ensure we don't crash on buffer protocol issues
+                        # SAFE BYTE EXTRACTION
                         ptr = rgba_canvas.bits()
                         size = rgba_canvas.sizeInBytes()
                         arr = np.frombuffer(ptr, np.uint8, count=size).reshape((rgba_canvas.height(), rgba_canvas.width(), 4))
+                        
+                        # We MUST copy the array because canvas/rgba_canvas are local to this loop iteration
+                        # and will be reused/destroyed before the UI thread consumes the raw_frame.
                         raw_frame = arr.copy()
                         
                         self.frame_ready_raw.emit((current_logical, raw_frame, effect_data))
@@ -146,6 +153,35 @@ class RenderEngine(QThread):
             c.applied_effects.update(defaults)
         return c
 
+    def _map_to_shader_uniforms(self, props):
+        """
+        DATA-BLIND MAPPING: Converts project properties to GPU shader uniforms.
+        Any key starting with 'e_' in the JSON preset is automatically passed to the shader.
+        This allows creating 50+ effects without changing a single line of Python code.
+        """
+        shader_data = {}
+        
+        # 1. Global Opacity (Standard for all visual clips)
+        shader_data["opacity"] = props.get("Opacity", 100) / 100.0
+        
+        # 2. Master Intensity Multiplier
+        # CapCut-style: 'effect_amount' scales all other 'e_' parameters for easy fading
+        amt = props.get("effect_amount", props.get("intensity", 100)) / 100.0
+        
+        # 3. Dynamic 'e_' Injection
+        # We loop through all provided properties. If a key starts with 'e_',
+        # we pass it to the shader. If it's a numeric value, we scale it by 'amt'.
+        for k, v in props.items():
+            if k.startswith("e_"):
+                if isinstance(v, (int, float)):
+                    # Special Case: Certain uniforms might be flags (0/1) or shouldn't scale
+                    # For now, we scale most effect parameters by the master amount.
+                    shader_data[k] = v * amt
+                else:
+                    shader_data[k] = v
+                
+        return shader_data
+
     def _draw_media(self, painter, clip, current_ms, proj_w, proj_h):
         file_path = clip.file_path
         if clip.clip_type == "video" and app_config.get_setting("auto_proxies", True):
@@ -172,6 +208,7 @@ class RenderEngine(QThread):
             diff = abs(local_ms - reader_data["last_ms"])
             frame_array = None
             
+            # SNAPPY SEEKING: Use a very short timeout during scrubs to prevent UI hanging
             seek_threshold = 1000 if self.is_playing else 100
             
             if not self.is_playing or diff > seek_threshold:
@@ -183,11 +220,15 @@ class RenderEngine(QThread):
                     reader_data["last_seek_pos"] = target_pos
                 
                 try:
-                    # Balanced wait: 33ms during playback, but up to 500ms for static seeks to prevent black frames
-                    logical_pos, f = decoder.frame_queue.get(timeout=0.033 if self.is_playing else 0.5)
+                    # Non-blocking check for frame during scrub
+                    wait_time = 0.033 if self.is_playing else 0.005 
+                    logical_pos, f = decoder.frame_queue.get(timeout=wait_time)
                     frame_ms = logical_pos * 10.0
                     if abs(frame_ms - local_ms) < 500:
                         frame_array, reader_data["last_ms"] = f, frame_ms
+                    else:
+                        # Frame too far, flag for retry but don't block
+                        pending_seek = True
                 except queue.Empty:
                     if not self.is_playing:
                         pending_seek = True
@@ -207,25 +248,22 @@ class RenderEngine(QThread):
 
             if frame_array is not None:
                 # DYNAMIC GPU PARAMETER MAPPING
-                # We collect ALL properties from the JSON and animate them if needed.
-                # This makes the engine 'Data-Blind' and expandable via JSON.
                 rel_t = max(0.0, (current_ms - clip.start_time) / 10.0)
                 
-                # 1. Start with static properties from the preset
                 if isinstance(clip.applied_effects, dict):
                     effect_data.update(clip.applied_effects)
                 
-                # 2. Layer on animated values for keys that support them
-                # We look for any property starting with 'e_' (effect) or other standard uniforms
                 all_keys = list(effect_data.keys())
                 for key in all_keys:
                     if hasattr(clip, 'get_animated_value'):
-                        # If a keyframe exists for this property, use it. Otherwise keep static.
                         val = clip.get_animated_value(key, rel_t, effect_data[key])
                         effect_data[key] = val
 
-                # Legacy QImage for UI
-                qimg = QImage(frame_array.data, frame_array.shape[1], frame_array.shape[0], frame_array.shape[2]*frame_array.shape[1], QImage.Format_RGBA8888).copy()
+                # 3. Map to shader uniforms
+                effect_data = self._map_to_shader_uniforms(effect_data)
+
+                # OPTIMIZED: Wrap the numpy buffer directly without .copy()
+                qimg = QImage(frame_array.data, frame_array.shape[1], frame_array.shape[0], frame_array.shape[2]*frame_array.shape[1], QImage.Format_RGBA8888)
                 
         elif clip.clip_type == "image":
             img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
@@ -270,7 +308,7 @@ class RenderEngine(QThread):
         if not project: return None
         proj_w, proj_h = project.resolution
         rw, rh = int(proj_w * self._render_scale), int(proj_h * self._render_scale)
-        canvas = QImage(rw, rh, QImage.Format_ARGB32); canvas.fill(Qt.black)
+        canvas = QImage(rw, rh, QImage.Format_RGBA8888); canvas.fill(Qt.black)
         painter = QPainter(canvas)
         painter.setRenderHint(QPainter.Antialiasing, self._render_scale >= 1.0)
         painter.setRenderHint(QPainter.SmoothPixmapTransform, self._render_scale >= 1.0)

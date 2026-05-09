@@ -32,4 +32,4 @@ This is the master index for the GPU migration and Cloud Store integration. The 
     - **Flash/Lite Models** for boilerplate, research, and simple tool tasks.
 - **Sub-Agents:** Use `codebase_investigator` for deep mapping and `generalist` for batch operations.
 - **Logging:** Mandatory `hive_logger` debug logs for all new logic (Network, GL, Model updates).
-- **Validation:** Every phase must be verified with a dedicated test script and manual playback using `Project-05-08`.
+- **Validation:** Every phase must be verified with a dedicated test script and manual playback using `Project-05-06`.
