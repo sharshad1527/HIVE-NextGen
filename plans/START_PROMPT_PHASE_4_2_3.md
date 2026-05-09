@@ -27,5 +27,14 @@ You are tasked with building the data registry, lazy-loading memory manager, and
    - **Viewport Performance:** Implement dynamic resolution scaling for the viewport if render times exceed 16ms per frame. Smooth playback is priority #1.
    - **Logging:** Log cache hits/misses, GPU uniform injections, and RAM allocation limits clearly via `hive_logger`.
 
-4. **Action:**
+4. **Automated Testing & Self-Healing:**
+   - **Mandatory Tests:** Create deep-logic tests for the Registry and Wiring (e.g., `tests/test_effect_registry.py`, `tests/test_gpu_wiring_latency.py`).
+   - **Manual Run & Verification:** Execute the project-specific build and test commands (e.g., `pytest`, `ruff check`) autonomously.
+   - **Error Handling:** If an error occurs:
+     - Delegate deep debugging to a sub-agent.
+     - Review the sub-agent's fix and apply it.
+     - Re-validate with original and new test cases.
+   - **Final Handshake:** You must confirm that `Project-05-06` loads and plays perfectly with the new backend before finishing.
+
+5. **Action:**
    - Acknowledge these instructions and begin Step 1 immediately.

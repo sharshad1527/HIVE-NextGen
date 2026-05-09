@@ -23,5 +23,14 @@ You are tasked with implementing the UI/UX for the Effects, Captions, and Transi
    - **Performance:** UI Thread MUST NEVER block. Use proper Qt asynchronous paradigms (QThread/Signals) for fetching, loading thumbnails, and animations.
    - **Logging & Debugging:** Log EVERYTHING. Use the internal logger to trace every UI state change, download trigger, and timeline drop event. If an error occurs, it must be completely traceable via the console.
 
-4. **Action:**
+4. **Automated Testing & Self-Healing:**
+   - **Mandatory Tests:** For every component implemented, you MUST create a dedicated test script (e.g., `tests/test_ui_grid_virtualization.py`).
+   - **Manual Run & Verification:** You must execute these tests yourself. Do not wait for the user to tell you.
+   - **Error Handling:** If a test fails or a bug is found:
+     - Use a sub-agent to analyze the logs and the failing code.
+     - Automatically propose and apply the fix.
+     - Re-run tests until 100% success is achieved.
+   - **Zero-Error Policy:** You are responsible for confirming the implementation is error-free before declaring the phase complete.
+
+5. **Action:**
    - Acknowledge these instructions and begin Step 1 immediately.

@@ -42,3 +42,9 @@ To implement the "Brain" (Phase 4.2) and the "Nervous System" (Phase 4.3) that p
 ### 3. The Live "Injection" Bridge
 *   **Strategy:** Real-time property updates.
 *   **Implementation:** Build the bridge between Phase 4.1 UI sliders and Phase 3 GLSL Uniforms. When a user moves an "Intensity" slider, the value is instantly injected into the active shader program without requiring a full frame reload.
+
+## 🧪 Testing & Validation
+*   **Unit Tests:** Validate the Registry's ability to map IDs to paths and handle missing assets.
+*   **Performance Tests:** Measure the latency between a UI slider movement and the GPU uniform update (Target: <16ms).
+*   **Project Stress Test:** Load a project with 100+ linked effects and verify smooth playback via the LRU cache.
+*   **Self-Healing:** AI is mandated to autonomously debug and fix any memory leaks or logic errors using specialized sub-agents.

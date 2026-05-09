@@ -32,3 +32,8 @@ Build a professional, highly responsive, "CapCut-style" user interface for the E
 ## 4. The Properties Panel & Keyframes
 *   **Contextual Integration:** Clicking an Effect block or FX badge dynamically populates the Properties Panel based on the effect's JSON.
 *   **Keyframe Engine UI:** A "diamond" icon next to properties for keyframing.
+
+## 🧪 Testing & Validation
+*   **Automated UI Tests:** Test scripts to verify grid virtualization (rendering only visible items) and async download signals.
+*   **Manual Validation:** Visually verify the custom toast notifications and the orange progress ring.
+*   **Self-Healing:** AI will use sub-agents to fix any rendering or threading issues discovered during testing.
