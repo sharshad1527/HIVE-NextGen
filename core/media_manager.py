@@ -308,7 +308,8 @@ class MediaManager:
         self.max_concurrent_proxies = 2 # Strictly enforces limit to protect OS resources
         
         self._captures = {}
-        self._cap_lock = threading.Lock()
+        self._cap_lock = threading.RLock()
+        self._image_cache = {}
         self.hw_encoder = None
 
     def _load_metadata_cache(self):
@@ -355,13 +356,38 @@ class MediaManager:
     def _get_capture(self, file_path):
         if not CV2_AVAILABLE:
             return None
-        if file_path not in self._captures:
-            # Explicitly force CAP_FFMPEG and CAP_DSHOW to prevent windowed backends like MSMF
-            # On Windows, DirectShow and FFmpeg are silent, while MSMF can spawn console windows.
-            self._captures[file_path] = cv2.VideoCapture(file_path, cv2.CAP_FFMPEG)
-            if not self._captures[file_path].isOpened():
-                self._captures[file_path] = cv2.VideoCapture(file_path, cv2.CAP_DSHOW)
-        return self._captures[file_path]
+        with self._cap_lock:
+            if file_path not in self._captures:
+                # Explicitly force CAP_FFMPEG and CAP_DSHOW to prevent windowed backends like MSMF
+                # On Windows, DirectShow and FFmpeg are silent, while MSMF can spawn console windows.
+                self._captures[file_path] = cv2.VideoCapture(file_path, cv2.CAP_FFMPEG)
+                if not self._captures[file_path].isOpened():
+                    self._captures[file_path] = cv2.VideoCapture(file_path, cv2.CAP_DSHOW)
+            return self._captures[file_path]
+
+    def get_image(self, file_path):
+        """Phase 2 Fix: Cache static images in memory as numpy arrays."""
+        if not CV2_AVAILABLE or not os.path.exists(file_path):
+            return None
+            
+        with self._cap_lock:
+            if file_path in self._image_cache:
+                return self._image_cache[file_path]
+                
+            from core.logger import hive_logger
+            hive_logger.debug(f"[MediaManager] Loading image to cache: {file_path}")
+            
+            img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+            if img is not None:
+                if len(img.shape) == 3 and img.shape[2] == 4:
+                    rgba = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
+                else:
+                    if len(img.shape) == 2: 
+                        img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                    rgba = cv2.cvtColor(img, cv2.COLOR_BGR2RGBA)
+                self._image_cache[file_path] = rgba
+                return rgba
+            return None
 
     def get_frame(self, file_path, time_sec):
         """Phase 3 Fix: Smart frame extraction allowing safe Reverse Playback."""
@@ -386,9 +412,11 @@ class MediaManager:
             return frame if ret else None
 
     def release_all(self):
-        for cap in self._captures.values():
-            cap.release()
-        self._captures.clear()
+        with self._cap_lock:
+            for cap in self._captures.values():
+                cap.release()
+            self._captures.clear()
+            self._image_cache.clear()
 
     def process_file(self, file_path):
         if not os.path.exists(file_path):
@@ -417,27 +445,41 @@ class MediaManager:
 
         thumb_path = None
         duration_sec = 0.0
+        width = 0
+        height = 0
 
         if media_type == 'image':
             thumb_path = file_path
+            try:
+                import cv2
+                img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+                if img is not None:
+                    width = img.shape[1]
+                    height = img.shape[0]
+            except Exception:
+                pass
         elif media_type == 'video':
             file_hash = hashlib.md5(file_path.encode()).hexdigest()
             thumb_path = str(self.thumb_dir / f"{file_hash}.jpg")
             
             try:
                 import cv2
-                cap = cv2.VideoCapture(file_path)
-                fps = cap.get(cv2.CAP_PROP_FPS)
-                frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                if fps > 0 and frames > 0:
-                    duration_sec = frames / fps
+                with self._cap_lock:
+                    cap = cv2.VideoCapture(file_path)
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                    
+                    if fps > 0 and frames > 0:
+                        duration_sec = frames / fps
 
-                if not os.path.exists(thumb_path):
-                    ret, frame = cap.read()
-                    if ret:
-                        frame = cv2.resize(frame, (145, 80))
-                        cv2.imwrite(thumb_path, frame)
-                cap.release()
+                    if not os.path.exists(thumb_path):
+                        ret, frame = cap.read()
+                        if ret:
+                            frame = cv2.resize(frame, (145, 80))
+                            cv2.imwrite(thumb_path, frame)
+                    cap.release()
             except ImportError:
                 print("OpenCV (cv2) not installed. Skipping video thumbnail/duration detection.")
                 thumb_path = None
@@ -458,12 +500,13 @@ class MediaManager:
             if duration_sec <= 0:
                 try:
                     import cv2
-                    cap = cv2.VideoCapture(file_path)
-                    fps = cap.get(cv2.CAP_PROP_FPS)
-                    frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-                    if fps > 0 and frames > 0:
-                        duration_sec = frames / fps
-                    cap.release()
+                    with self._cap_lock:
+                        cap = cv2.VideoCapture(file_path)
+                        fps = cap.get(cv2.CAP_PROP_FPS)
+                        frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+                        if fps > 0 and frames > 0:
+                            duration_sec = frames / fps
+                        cap.release()
                 except Exception:
                     pass
 
@@ -475,6 +518,8 @@ class MediaManager:
             "icon": icon,
             "thumbnail": thumb_path,
             "duration": duration_sec,  # seconds, 0.0 if unknown
+            "width": width,
+            "height": height,
         }
         
         self.metadata_cache[cache_key] = result

@@ -194,21 +194,11 @@ class TimelinePreviewCanvas(HiveViewport):
         
         if clip.clip_type in ["video", "image"] and getattr(clip, "file_path", None) and os.path.exists(clip.file_path):
             if "media_w" not in props or "media_h" not in props:
-                try:
-                    import cv2
-                    if clip.clip_type == "video":
-                        cap = cv2.VideoCapture(clip.file_path)
-                        if cap.isOpened():
-                            props["media_w"] = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
-                            props["media_h"] = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
-                        cap.release()
-                    elif clip.clip_type == "image":
-                        img = cv2.imread(clip.file_path, cv2.IMREAD_UNCHANGED)
-                        if img is not None:
-                            props["media_w"] = img.shape[1]
-                            props["media_h"] = img.shape[0]
-                except ImportError:
-                    pass
+                from core.media_manager import media_manager
+                meta = media_manager.process_file(clip.file_path)
+                if meta:
+                    props["media_w"] = meta.get("width", 0)
+                    props["media_h"] = meta.get("height", 0)
             
             if props.get("media_w", 0) > 0 and props.get("media_h", 0) > 0:
                 mw, mh = props["media_w"], props["media_h"]

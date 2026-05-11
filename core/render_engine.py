@@ -264,24 +264,24 @@ class RenderEngine(QThread):
                 effect_data = self._map_to_shader_uniforms(effect_data)
 
                 # OPTIMIZED: Wrap the numpy buffer directly without .copy()
-                qimg = QImage(frame_array.data, frame_array.shape[1], frame_array.shape[0], frame_array.shape[2]*frame_array.shape[1], QImage.Format_RGBA8888)
+                if len(frame_array.shape) == 2:
+                    # Backward compatibility for Phase 2: Convert YUV to RGBA on Render Thread for QPainter
+                    import cv2
+                    rgba_frame = cv2.cvtColor(frame_array, cv2.COLOR_YUV2RGBA_I420)
+                    qimg = QImage(rgba_frame.data, rgba_frame.shape[1], rgba_frame.shape[0], 4 * rgba_frame.shape[1], QImage.Format_RGBA8888)
+                    # Keep a reference to prevent garbage collection before QPainter uses it
+                    reader_data["rgba_ref"] = rgba_frame
+                else:
+                    qimg = QImage(frame_array.data, frame_array.shape[1], frame_array.shape[0], frame_array.shape[2]*frame_array.shape[1], QImage.Format_RGBA8888)
                 
         elif clip.clip_type == "image":
-            if file_path in self._image_cache:
-                qimg = self._image_cache[file_path]
-            else:
-                img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-                if img is not None:
-                    if len(img.shape) == 3 and img.shape[2] == 4:
-                        rgba = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
-                        qimg = QImage(rgba.data, rgba.shape[1], rgba.shape[0], 4*rgba.shape[1], QImage.Format_RGBA8888).copy()
-                    else:
-                        if len(img.shape) == 2: img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-                        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                        qimg = QImage(rgb.data, rgb.shape[1], rgb.shape[0], 3*rgb.shape[1], QImage.Format_RGB888).copy()
-                    
-                    if qimg and not qimg.isNull():
-                        self._image_cache[file_path] = qimg
+            from core.media_manager import media_manager
+            rgba_frame = media_manager.get_image(file_path)
+            if rgba_frame is not None:
+                qimg = QImage(rgba_frame.data, rgba_frame.shape[1], rgba_frame.shape[0], 4 * rgba_frame.shape[1], QImage.Format_RGBA8888)
+                # Keep a reference to prevent garbage collection before QPainter uses it
+                reader_data = getattr(self, "_reader_data_dummy", {})
+                reader_data["rgba_ref"] = rgba_frame
 
         if qimg and not qimg.isNull():
             props = clip.applied_effects or {}
