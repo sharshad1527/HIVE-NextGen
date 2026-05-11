@@ -704,7 +704,7 @@ class PlayerPanel(QFrame):
 
         # Initial rebuild in case the project was already loaded before this panel was initialized
         if project_manager.current_project:
-            self._rebuild_audio_mixer()
+            self._sync_mixer_to_timeline()
             # Force first frame on startup
             QTimer.singleShot(1000, lambda: self.update_playhead(0))
 
@@ -1038,84 +1038,6 @@ class PlayerPanel(QFrame):
         if project_manager.current_project:
             self.audio_mixer.sync_from_project(project_manager.current_project)
 
-    def _rebuild_audio_mixer(self, *args):
-        """Scans the timeline and loads all audio/video clips into the AudioMixer."""
-        # 1. Clear the old tracks so we don't get duplicates
-        self.audio_mixer.clear_tracks()
-        
-        project = project_manager.current_project
-        if not project:
-            return
-
-        # 2. Iterate through every track and clip on the timeline
-        for track in project.tracks:
-            if getattr(track, 'is_muted', False) or getattr(track, 'is_hidden', False):
-                continue
-                
-            for clip in track.clips:
-                # 3. Only grab clips that actually contain audio
-                if clip.clip_type in ["video", "audio"] and getattr(clip, 'file_path', None):
-                    
-                    props = clip.applied_effects if isinstance(clip.applied_effects, dict) else {}
-                    
-                    # Calculate trims
-                    trim_in_ms = getattr(clip, 'trim_in', 0)
-                    fx_source_in = props.get("source_in", 0) * 10
-                    final_trim_in_ms = max(trim_in_ms, fx_source_in)
-                    
-                    # --- NEW LOGIC: Look for Conformed Audio ---
-                    normalized_path = clip.file_path.replace('\\', '/')
-                    file_hash = hashlib.md5(normalized_path.encode()).hexdigest()
-                    conformed_path = Path.home() / ".hive_editor" / "audio_cache" / f"{file_hash}_conformed.wav"
-                    target_audio_path = clip.file_path
-                    
-                    if conformed_path.exists():
-                        target_audio_path = str(conformed_path)
-
-                    elif clip.clip_type == "video":
-                        if file_hash not in self.audio_mixer.pending_extractions:
-                            print(f"Extracting audio for {clip.file_path}...")
-                            self.audio_mixer.pending_extractions.add(file_hash)
-                            
-                            from core.media_manager import media_manager
-                            
-                            def on_audio_ready(original_path, wav_path, f_hash=file_hash):
-                                print(f"Extraction complete! Rebuilding mixer...")
-                                self.audio_mixer.pending_extractions.discard(f_hash)
-                                self._rebuild_audio_mixer()
-                                
-                            def on_audio_fail(original_path, error_msg, f_hash=file_hash):
-                                print(f"Extraction FAILED: {error_msg}")
-                                self.audio_mixer.pending_extractions.discard(f_hash)
-                                
-                            media_manager.start_audio_conform(
-                                clip.file_path, 
-                                on_finish_callback=on_audio_ready,
-                                on_fail_callback=on_audio_fail
-                            )
-                        continue
-                    
-                    # 4. Create our new AudioTrack
-                    audio_track = AudioTrack(
-                        clip_id=clip.clip_id,
-                        file_path=target_audio_path,
-                        start_time_ms=clip.start_time,
-                        end_time_ms=clip.end_time,
-                        master_sample_rate=self.audio_mixer.sample_rate,
-                        trim_in_ms=final_trim_in_ms
-                    )
-
-                    # 5. Apply any static volume or panning from the UI properties
-                    vol_pct = props.get("Volume", 100)
-                    audio_track.volume = max(0.0, float(vol_pct) / 100.0)
-                    audio_track.pan = float(props.get("Pan", 0)) / 100.0
-                    
-                    # 6. Hand it to the engine!
-                    self.audio_mixer.add_track(audio_track)
-                    
-        # Sync the newly loaded tracks to the current playhead immediately
-        self.audio_mixer.seek(int(self.playhead * 10))
-        print(f"DUCKS IN THE ROW: Mixer rebuilt! Tracks loaded: {len(self.audio_mixer.tracks)}")
 
     def step_forward(self):
         if self.is_preview_mode and not self.is_timeline_preview:
