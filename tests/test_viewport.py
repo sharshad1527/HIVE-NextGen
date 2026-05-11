@@ -43,7 +43,7 @@ class ViewportTestWindow(QMainWindow):
         frame[:, ::20, 2] = 100 # Blue grid
         frame[:, ::20, 3] = 255
         
-        self.viewport.update_frame(frame)
+        self.viewport.update_frame((self.frame_count / 60.0, frame, {}))
         self.frame_count += 1
         if self.frame_count % 60 == 0:
             print(f"Rendered {self.frame_count} frames...")

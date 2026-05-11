@@ -2,12 +2,90 @@
 import os
 import hashlib
 import numpy as np
-import scipy.signal 
 import threading
+import time
 from pathlib import Path
 import soundfile as sf
 import sounddevice as sd
 from core.logger import hive_logger
+
+class LinearInterpolator:
+    @staticmethod
+    def resample(data, original_sr, target_sr, target_frames):
+        if len(data) == 0:
+            return data
+        
+        original_frames = len(data)
+        x_old = np.linspace(0, original_frames - 1, original_frames)
+        x_new = np.linspace(0, original_frames - 1, target_frames)
+        
+        channels = data.shape[1]
+        resampled_data = np.zeros((target_frames, channels), dtype=np.float32)
+        
+        for c in range(channels):
+            resampled_data[:, c] = np.interp(x_new, x_old, data[:, c])
+            
+        return resampled_data
+
+class RingBuffer:
+    def __init__(self, capacity, channels):
+        self.capacity = capacity
+        self.channels = channels
+        self.buffer = np.zeros((capacity, channels), dtype=np.float32)
+        self.write_ptr = 0
+        self.read_ptr = 0
+        self.size = 0
+        self.lock = threading.Lock()
+        
+    def push(self, data):
+        frames = len(data)
+        if frames == 0:
+            return 0
+            
+        with self.lock:
+            frames_to_write = min(frames, self.capacity - self.size)
+            if frames_to_write < frames:
+                data = data[:frames_to_write]
+                
+            end_idx = self.write_ptr + frames_to_write
+            if end_idx <= self.capacity:
+                self.buffer[self.write_ptr:end_idx] = data
+            else:
+                first_part = self.capacity - self.write_ptr
+                second_part = frames_to_write - first_part
+                self.buffer[self.write_ptr:] = data[:first_part]
+                self.buffer[:second_part] = data[first_part:]
+                
+            self.write_ptr = (self.write_ptr + frames_to_write) % self.capacity
+            self.size += frames_to_write
+            return frames_to_write
+
+    def pop(self, frames):
+        with self.lock:
+            frames_to_read = min(frames, self.size)
+            if frames_to_read == 0:
+                return np.zeros((0, self.channels), dtype=np.float32)
+                
+            end_idx = self.read_ptr + frames_to_read
+            out_data = np.zeros((frames_to_read, self.channels), dtype=np.float32)
+            
+            if end_idx <= self.capacity:
+                out_data[:] = self.buffer[self.read_ptr:end_idx]
+            else:
+                first_part = self.capacity - self.read_ptr
+                second_part = frames_to_read - first_part
+                out_data[:first_part] = self.buffer[self.read_ptr:]
+                out_data[first_part:] = self.buffer[:second_part]
+                
+            self.read_ptr = (self.read_ptr + frames_to_read) % self.capacity
+            self.size -= frames_to_read
+            return out_data
+            
+    def clear(self):
+        with self.lock:
+            self.write_ptr = 0
+            self.read_ptr = 0
+            self.size = 0
 
 class AudioTrack:
     """Represents a single audio clip mapped to specific times on the timeline."""
@@ -36,6 +114,60 @@ class AudioTrack:
         # Calculate the ratio (e.g., 48000 / 44100 = ~1.088)
         self.resample_ratio = self.native_sample_rate / self.master_sample_rate
 
+        # --- BACKGROUND BUFFERING ---
+        # 1 second buffer at master sample rate
+        self.buffer = RingBuffer(master_sample_rate, self.channels)
+        self._stop_event = threading.Event()
+        self._seek_request = None
+        self._seek_lock = threading.Lock()
+        
+        self.worker_thread = threading.Thread(target=self._fill_buffer_thread, daemon=True)
+        self.worker_thread.start()
+
+    def _fill_buffer_thread(self):
+        # Read chunks of ~0.1s
+        chunk_size = int(self.master_sample_rate * 0.1)
+        
+        while not self._stop_event.is_set():
+            # Handle seek
+            with self._seek_lock:
+                if self._seek_request is not None:
+                    try:
+                        self.audio_file.seek(self._seek_request)
+                    except Exception as e:
+                        hive_logger.error(f"Error seeking audio file {self.file_path}: {e}")
+                    self.buffer.clear()
+                    self._seek_request = None
+            
+            # If buffer is almost full, sleep and wait
+            if self.buffer.capacity - self.buffer.size < chunk_size:
+                time.sleep(0.01)
+                continue
+                
+            # Read from disk
+            try:
+                frames_to_read = int(chunk_size * self.resample_ratio) if self.needs_resampling else chunk_size
+                native_data = self.audio_file.read(frames_to_read, always_2d=True)
+                
+                if len(native_data) > 0:
+                    if self.needs_resampling:
+                        processed_data = LinearInterpolator.resample(
+                            native_data, 
+                            self.native_sample_rate, 
+                            self.master_sample_rate, 
+                            chunk_size
+                        )
+                    else:
+                        processed_data = np.array(native_data, dtype=np.float32)
+                        
+                    self.buffer.push(processed_data)
+                else:
+                    # EOF, sleep a bit to prevent spinning
+                    time.sleep(0.05)
+            except Exception as e:
+                hive_logger.error(f"Error reading audio file {self.file_path}: {e}")
+                time.sleep(0.1)
+
     def update_timing(self, start_time_ms, end_time_ms, trim_in_ms):
         self.start_time_ms = start_time_ms
         self.end_time_ms = end_time_ms
@@ -52,8 +184,6 @@ class AudioTrack:
     def seek_to_timeline_time(self, playhead_ms):
         """
         Calculates exactly where the file pointer needs to be.
-        Crucially, it calculates this based on the file's NATIVE sample rate,
-        even though the timeline operates on the MASTER sample rate.
         """
         if not self.is_active_at(playhead_ms):
             return
@@ -61,32 +191,22 @@ class AudioTrack:
         elapsed_in_clip_ms = playhead_ms - self.start_time_ms
         total_offset_ms = elapsed_in_clip_ms + self.trim_in_ms
 
-        # We MUST seek using the native sample rate of the file!
         target_frame = int((total_offset_ms / 1000.0) * self.native_sample_rate)
 
-        self.audio_file.seek(target_frame)
+        with self._seek_lock:
+            self._seek_request = target_frame
 
     def read_chunk(self, required_master_frames):
         """
-        Reads a chunk of audio, resampling it on the fly if the sample rates don't match.
+        Pops a chunk of audio from the background buffer.
         """
-        if not self.needs_resampling:
-            # Native match: Just read the exact frames requested by the mixer
-            return self.audio_file.read(required_master_frames, always_2d=True)
-
-        # Mismatch: We must read MORE or FEWER frames from the file,
-        # then stretch/squash them to exactly match the required_master_frames
-        frames_to_read = int(required_master_frames * self.resample_ratio)
-        native_data = self.audio_file.read(frames_to_read, always_2d=True)
-
-        if len(native_data) == 0:
-            return native_data
-
-        # Use scipy to resample the audio array to perfectly fit the master mixer's request
-        resampled_data = scipy.signal.resample(native_data, required_master_frames)
-        return np.array(resampled_data, dtype=np.float32)
+        return self.buffer.pop(required_master_frames)
 
     def close(self):
+        self._stop_event.set()
+        if hasattr(self, 'worker_thread') and self.worker_thread.is_alive():
+            self.worker_thread.join(timeout=0.5)
+            
         if not self.audio_file.closed:
             self.audio_file.close()
 

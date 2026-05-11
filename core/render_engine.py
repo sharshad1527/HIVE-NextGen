@@ -33,6 +33,7 @@ class RenderEngine(QThread):
         self.playhead_logical = 0.0
         self.mutex = QMutex()
         self.video_readers = {}
+        self._image_cache = {}
         self._target_fps = 30.0
         self._render_scale = 1.0
         self._run_flag = True
@@ -266,15 +267,21 @@ class RenderEngine(QThread):
                 qimg = QImage(frame_array.data, frame_array.shape[1], frame_array.shape[0], frame_array.shape[2]*frame_array.shape[1], QImage.Format_RGBA8888)
                 
         elif clip.clip_type == "image":
-            img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
-            if img is not None:
-                if len(img.shape) == 3 and img.shape[2] == 4:
-                    rgba = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
-                    qimg = QImage(rgba.data, rgba.shape[1], rgba.shape[0], 4*rgba.shape[1], QImage.Format_RGBA8888).copy()
-                else:
-                    if len(img.shape) == 2: img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-                    rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    qimg = QImage(rgb.data, rgb.shape[1], rgb.shape[0], 3*rgb.shape[1], QImage.Format_RGB888).copy()
+            if file_path in self._image_cache:
+                qimg = self._image_cache[file_path]
+            else:
+                img = cv2.imread(file_path, cv2.IMREAD_UNCHANGED)
+                if img is not None:
+                    if len(img.shape) == 3 and img.shape[2] == 4:
+                        rgba = cv2.cvtColor(img, cv2.COLOR_BGRA2RGBA)
+                        qimg = QImage(rgba.data, rgba.shape[1], rgba.shape[0], 4*rgba.shape[1], QImage.Format_RGBA8888).copy()
+                    else:
+                        if len(img.shape) == 2: img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+                        rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                        qimg = QImage(rgb.data, rgb.shape[1], rgb.shape[0], 3*rgb.shape[1], QImage.Format_RGB888).copy()
+                    
+                    if qimg and not qimg.isNull():
+                        self._image_cache[file_path] = qimg
 
         if qimg and not qimg.isNull():
             props = clip.applied_effects or {}

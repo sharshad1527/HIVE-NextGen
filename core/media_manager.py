@@ -373,17 +373,17 @@ class MediaManager:
             if not cap or not cap.isOpened():
                 return None
             
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if fps <= 0: fps = 30.0
-        
-        target_frame = int(time_sec * fps)
-        current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
-        
-        if target_frame < current_frame or target_frame > current_frame + 2:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+            fps = cap.get(cv2.CAP_PROP_FPS)
+            if fps <= 0: fps = 30.0
             
-        ret, frame = cap.read()
-        return frame if ret else None
+            target_frame = int(time_sec * fps)
+            current_frame = int(cap.get(cv2.CAP_PROP_POS_FRAMES))
+            
+            if target_frame < current_frame or target_frame > current_frame + 2:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+                
+            ret, frame = cap.read()
+            return frame if ret else None
 
     def release_all(self):
         for cap in self._captures.values():
