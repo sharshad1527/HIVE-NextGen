@@ -7,6 +7,7 @@ from PySide6.QtGui import QPixmap, QAction
 from PySide6.QtCore import Qt, QSize, QEvent, Signal
 from utils.paths import get_asset_path
 from ui.about_dialog import AboutDialog, ClickableLabel
+from ui.logo_animation import HiveLogoAnimation
 
 class Sidebar(QWidget):
     project_hub_requested = Signal()
@@ -40,14 +41,9 @@ class Sidebar(QWidget):
         sidebar_layout.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
 
         # Logo
-        self.lbl_logo = ClickableLabel()
+        self.lbl_logo = HiveLogoAnimation(self)
         self.lbl_logo.setFixedSize(85, 44) 
-        self.lbl_logo.setAlignment(Qt.AlignCenter)
-        self.lbl_logo.setStyleSheet("background-color: transparent; border: none;")
-        logo_path = get_asset_path("logos", "HIVE_Logo_Mark.svg")
-        pixmap = QPixmap(logo_path)
-        scaled_pixmap = pixmap.scaled(44, 44, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.lbl_logo.setPixmap(scaled_pixmap)
+        self.lbl_logo.start_flow("C")
         sidebar_layout.addWidget(self.lbl_logo, 0, Qt.AlignHCenter)
         self.lbl_logo.clicked.connect(self.show_about_dialog)
 
@@ -195,5 +191,8 @@ class Sidebar(QWidget):
     
     def show_about_dialog(self):
         """Create and show the pop-up"""
+        self.lbl_logo.start_flow("B")
         dialog = AboutDialog(self)
         dialog.exec()
+        # Revert sidebar logo to Idle flow once About is closed
+        self.lbl_logo.start_flow("C")

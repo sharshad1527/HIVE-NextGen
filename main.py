@@ -6,13 +6,17 @@ import os
 os.environ["OPENCV_VIDEOIO_PRIORITY_MSMF"] = "0"
 os.environ["OPENCV_FFMPEG_THREADS"] = "1"
 
+# FORCE OPENGL FOR QT QUICK TO AVOID D3D11 INCOMPATIBILITY WITH QOpenGLWidget
+os.environ["QSG_RHI_BACKEND"] = "opengl"
+os.environ["QT_QUICK_BACKEND"] = "opengl"
+
 import ctypes
 import random
 from datetime import datetime
 
 from PySide6.QtWidgets import (
     QApplication, QFileDialog, QMessageBox, QWidget, 
-    QVBoxLayout, QProgressBar, QLabel
+    QVBoxLayout, QHBoxLayout, QProgressBar, QLabel
 )
 from PySide6.QtGui import (
     QIcon, QPainter, QRadialGradient, QColor, 
@@ -27,6 +31,7 @@ from core.font_manager import font_manager
 from core.media_manager import media_manager
 from core.logger import logger_manager
 from utils.paths import get_asset_path
+from ui.logo_animation import HiveLogoAnimation
 
 class StartupWorker(QThread):
     """
@@ -62,14 +67,17 @@ class StartupWorker(QThread):
             
             # 6. MODULE PRE-WARMING: Import heavy UI modules in background
             # This populates sys.modules cache without blocking the main thread.
-            self.progress_update.emit(80, "Pre-warming UI engine...")
-            import ui.main_window
-            import ui.project_hub
+            modules_to_load = [
+                ("ui.main_window", 82), ("ui.project_hub", 84), ("ui.player", 86),
+                ("ui.timeline", 88), ("ui.workspace", 90), ("ui.properties", 92),
+                ("core.audio_mixer", 94), ("core.video_decoder", 96), ("core.render_engine", 98)
+            ]
+            
+            for mod_name, progress in modules_to_load:
+                self.progress_update.emit(progress, f"Pre-warming {mod_name}...")
+                __import__(mod_name)
             
             # 7. Final handoff
-            self.progress_update.emit(95, "Syncing system components...")
-            self.msleep(300) 
-            
             self.progress_update.emit(100, "Ready.")
             self.finished_successfully.emit()
             
@@ -98,21 +106,21 @@ class SplashWindow(QWidget):
         self.center_on_screen()
 
     def _generate_premium_background_texture(self):
-        """Generates the signature grain/noise texture to match the H.I.V.E aesthetic."""
+        """Generates the signature grain/noise texture with optimized batching."""
         size = 128
         image = QImage(size, size, QImage.Format_ARGB32)
         image.fill(Qt.transparent)
+        
         for y in range(size):
             for x in range(size):
-                if random.random() > 0.25:
-                    intensity = random.randint(0, 18)
+                r = random.random()
+                if r > 0.3:
+                    intensity = int(r * 18)
                     if (x + y) % 4 == 0: intensity += 8
-                    if (x - y) % 4 == 0: intensity -= 4
-                    intensity = max(0, min(255, intensity))
                     image.setPixelColor(x, y, QColor(0, 0, 0, intensity + 15))
-                else:
-                    if random.random() > 0.8:
-                        image.setPixelColor(x, y, QColor(255, 255, 255, random.randint(2, 6)))
+                elif r > 0.95:
+                    image.setPixelColor(x, y, QColor(255, 255, 255, random.randint(2, 6)))
+        
         self.bg_texture = QPixmap.fromImage(image)
 
     def setup_ui(self):
@@ -120,14 +128,11 @@ class SplashWindow(QWidget):
         layout.setContentsMargins(40, 60, 40, 40)
         layout.setSpacing(10)
         
-        # Branding: Logo
-        self.logo_label = QLabel()
-        logo_path = get_asset_path("logos", "HIVE_Logo_Mark.svg")
-        if os.path.exists(logo_path):
-            pixmap = QPixmap(logo_path).scaled(90, 90, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            self.logo_label.setPixmap(pixmap)
-        self.logo_label.setAlignment(Qt.AlignCenter)
-        layout.addWidget(self.logo_label)
+        # Branding: Animated Logo
+        self.logo_animation = HiveLogoAnimation()
+        self.logo_animation.setFixedSize(240, 160)
+        self.logo_animation.start_flow("A")
+        layout.addWidget(self.logo_animation, alignment=Qt.AlignCenter)
         
         # Branding: Title
         self.title_label = QLabel("H.I.V.E")
@@ -138,6 +143,7 @@ class SplashWindow(QWidget):
                 font-weight: 900;
                 font-style: italic;
                 letter-spacing: 4px;
+                padding-left: 4px;
             }
         """)
         self.title_label.setAlignment(Qt.AlignCenter)

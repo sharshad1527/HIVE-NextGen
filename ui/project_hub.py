@@ -18,6 +18,7 @@ from core.app_config import app_config
 from ui.settings_dialog import SettingsDialog
 from utils.paths import get_asset_path
 from ui.about_dialog import AboutDialog, ClickableLabel
+from ui.logo_animation import HiveLogoAnimation
 
 class HubSidebar(QWidget):
     def __init__(self, parent=None):
@@ -42,14 +43,9 @@ class HubSidebar(QWidget):
         # sidebar_layout.addWidget(self.lbl_logo, 0, Qt.AlignHCenter)
 
         # Logo
-        self.lbl_logo = ClickableLabel()
+        self.lbl_logo = HiveLogoAnimation(self)
         self.lbl_logo.setFixedSize(85, 44) 
-        self.lbl_logo.setAlignment(Qt.AlignCenter)
-        self.lbl_logo.setStyleSheet("background-color: transparent; border: none;")
-        logo_path = get_asset_path("logos", "HIVE_Logo_Mark.svg")
-        pixmap = QPixmap(logo_path)
-        scaled_pixmap = pixmap.scaled(44, 44, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        self.lbl_logo.setPixmap(scaled_pixmap)
+        self.lbl_logo.start_flow("C")
         sidebar_layout.addWidget(self.lbl_logo, 0, Qt.AlignHCenter)
         sidebar_layout.addSpacing(10)
         self.lbl_logo.clicked.connect(self.show_about_dialog)
@@ -112,8 +108,11 @@ class HubSidebar(QWidget):
 
     def show_about_dialog(self):
         """Create and show the pop-up"""
+        self.lbl_logo.start_flow("B")
         dialog = AboutDialog(self)
         dialog.exec()
+        # Revert hub logo to Idle flow once About is closed
+        self.lbl_logo.start_flow("C")
 
 class HubTitleBar(QFrame):
     def __init__(self, parent=None):
@@ -200,17 +199,21 @@ class ProjectHubWindow(QMainWindow):
             self.scroll_area.ensureWidgetVisible(card)
 
     def _generate_premium_background_texture(self):
+        """Generates the signature grain/noise texture with optimized batching."""
         size = 128
         image = QImage(size, size, QImage.Format_ARGB32)
         image.fill(Qt.transparent)
+        
         for y in range(size):
             for x in range(size):
-                if random.random() > 0.25:
-                    intensity = random.randint(0, 18)
+                r = random.random()
+                if r > 0.3:
+                    intensity = int(r * 18)
+                    if (x + y) % 4 == 0: intensity += 8
                     image.setPixelColor(x, y, QColor(0, 0, 0, intensity + 15))
-                else:
-                    if random.random() > 0.8:
-                        image.setPixelColor(x, y, QColor(255, 255, 255, random.randint(2, 6)))
+                elif r > 0.95:
+                    image.setPixelColor(x, y, QColor(255, 255, 255, random.randint(2, 6)))
+        
         self.bg_texture = QPixmap.fromImage(image)
 
     def paintEvent(self, event):

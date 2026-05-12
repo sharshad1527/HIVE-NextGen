@@ -4,6 +4,7 @@ from PySide6.QtWidgets import QDialog, QVBoxLayout, QLabel, QPushButton, QHBoxLa
 from PySide6.QtCore import Qt, Signal, QUrl
 from PySide6.QtGui import QPixmap, QDesktopServices
 from utils.paths import get_asset_path
+from ui.logo_animation import HiveLogoAnimation
 
 class ClickableLabel(QLabel):
     clicked = Signal()
@@ -48,13 +49,10 @@ class AboutDialog(QDialog):
         frame_layout.setSpacing(15)
 
         # 1. Logo
-        lbl_logo = QLabel()
-        lbl_logo.setAlignment(Qt.AlignCenter)
-        lbl_logo.setStyleSheet("border: none; background: transparent;")
-        logo_path = get_asset_path("logos", "HIVE_Logo_Mark.svg")
-        pixmap = QPixmap(logo_path).scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        lbl_logo.setPixmap(pixmap)
-        frame_layout.addWidget(lbl_logo, 0, Qt.AlignHCenter)
+        self.lbl_logo = HiveLogoAnimation(self)
+        self.lbl_logo.setFixedSize(200, 160)
+        self.lbl_logo.start_flow("B")
+        frame_layout.addWidget(self.lbl_logo, 0, Qt.AlignHCenter)
 
         # 2. App Name
         lbl_title = QLabel("H.I.V.E")
