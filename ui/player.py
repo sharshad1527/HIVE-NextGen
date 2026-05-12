@@ -544,10 +544,6 @@ class PlayerPanel(QFrame):
         # self.audio_players = {}
         self.audio_mixer = audio_mixer
 
-        self.play_timer = QTimer(self)
-        self.play_timer.setTimerType(Qt.PreciseTimer)
-        self.play_timer.timeout.connect(self._on_play_step)
-
         self.render_engine = RenderEngine()
         self.render_engine.frame_ready.connect(self._on_timeline_frame_received)
         self.render_engine.frame_ready_raw.connect(self._on_timeline_frame_received_raw)
@@ -591,6 +587,7 @@ class PlayerPanel(QFrame):
         self.video_widget = QVideoWidget()
         self.timeline_canvas = TimelinePreviewCanvas()
         
+        self.timeline_canvas.frameSwapped.connect(self._on_play_step)
         self.timeline_canvas.transform_changed.connect(self._on_canvas_transform)
         
         if hasattr(global_signals, 'clip_transform_changed'):
@@ -856,7 +853,7 @@ class PlayerPanel(QFrame):
             self.media_stack.setCurrentWidget(self.timeline_canvas)
             
             if not self.is_playing:
-                self.play_timer.start(33)
+                self.timeline_canvas.update()
                 self.render_engine.set_playing(True)
                 self.btn_play.setIcon(qta.icon('mdi6.pause', color='#e66b2c'))
                 self.is_playing = True
@@ -1004,7 +1001,7 @@ class PlayerPanel(QFrame):
                 self.media_stack.setCurrentWidget(self.timeline_canvas)
 
             if self.is_playing:
-                self.play_timer.stop()
+                # self.play_timer removed for pull-based sync
                 self.render_engine.set_playing(False)
                 self.btn_play.setIcon(qta.icon('mdi6.play', color='#e66b2c'))
                 if not self.is_timeline_preview:
@@ -1020,7 +1017,7 @@ class PlayerPanel(QFrame):
                 self.playback_start_time = time.time()
                 self.playback_start_playhead = self.playhead
                 
-                self.play_timer.start(33) 
+                self.timeline_canvas.update() 
                 self.render_engine.set_playing(True)
                 self.btn_play.setIcon(qta.icon('mdi6.pause', color='#e66b2c'))
                 if not self.is_timeline_preview:
@@ -1114,7 +1111,7 @@ class PlayerPanel(QFrame):
     def reset_player(self):
         """Clears all state and prepares for a new project."""
         self.is_playing = False
-        self.play_timer.stop()
+        # self.play_timer removed for pull-based sync
         self.playhead = 0.0
         self.duration = 0.0
         self.is_preview_mode = False
@@ -1167,7 +1164,7 @@ class PlayerPanel(QFrame):
     def _cleanup(self):
         hive_logger.info("PlayerPanel: Cleaning up...")
         self.is_playing = False
-        self.play_timer.stop()
+        # self.play_timer removed for pull-based sync
         
         if hasattr(self, 'timeline_canvas'):
             self.timeline_canvas.cleanupGL()

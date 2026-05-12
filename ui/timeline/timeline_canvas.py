@@ -20,7 +20,7 @@ except ImportError:
 from core.project_manager import project_manager
 from core.app_config import app_config
 from core.media_manager import media_manager
-from .timeline_workers import FrameFetchWorker
+from .timeline_workers import PersistentThumbnailWorker
 
 try:
     import cv2
@@ -299,9 +299,15 @@ class TracksCanvas(QWidget):
         if cache_key not in self.pending_thumbs:
             if len(self.pending_thumbs) < 30: 
                 self.pending_thumbs.add(cache_key)
-                worker = FrameFetchWorker(file_path, time_ms_quantized, target_height, cache_key, disk_cache_path)
-                worker.signals.loaded.connect(self._on_dynamic_thumb_loaded)
-                self.thread_pool.start(worker)
+                worker = PersistentThumbnailWorker.get_instance()
+                # Use a unique connection or ensure signals aren't duplicated. 
+                # Instead of connecting every time, we can connect once in __init__ or use lambda.
+                # Actually, connecting once globally is better, but since it's a singleton, we can just connect here if not connected.
+                try:
+                    worker.signals.loaded.connect(self._on_dynamic_thumb_loaded, Qt.UniqueConnection)
+                except Exception:
+                    pass
+                worker.request_thumbnail(file_path, time_ms_quantized, target_height, cache_key, disk_cache_path)
 
         fallback_path = os.path.join(self.get_project_cache_dir(), f"{file_hash}.jpg")
         if not os.path.exists(fallback_path):
@@ -2147,12 +2153,14 @@ class TracksCanvas(QWidget):
             if self.is_track_locked(t["id"]):
                 painter.fillRect(visible_left, ty, clip_rect.width(), th, QColor(0, 0, 0, 90))
 
+        items_by_id = {item["id"]: item for item in self.items}
+        
         word_groups = {}
         for item in self.items:
             if self.is_track_hidden(item["track"]): continue
             
             if item["type"] == "word" and "parent_id" in item:
-                parent = next((p for p in self.items if p["id"] == item["parent_id"]), None)
+                parent = items_by_id.get(item["parent_id"])
                 if parent:
                     p_start = parent["x"] * z
                     p_end = (parent["x"] + parent["w"]) * z
@@ -2167,7 +2175,7 @@ class TracksCanvas(QWidget):
                     word_groups[key]["hovered"] = True
 
         for (track_id, pid), data in word_groups.items():
-            parent = next((p for p in self.items if p["id"] == pid), None)
+            parent = items_by_id.get(pid)
             if parent:
                 ty, th = self.get_track_y(track_id)
                 if th > 0:
@@ -2197,7 +2205,7 @@ class TracksCanvas(QWidget):
             is_hovered = (self.hovered_id == item["id"])
             
             if item["type"] == "word":
-                parent = next((p for p in self.items if p["id"] == item.get("parent_id")), None)
+                parent = items_by_id.get(item.get("parent_id"))
                 if parent:
                     word_center = item["x"] + item["w"] / 2
                     if not (parent["x"] <= word_center <= parent["x"] + parent["w"]):
