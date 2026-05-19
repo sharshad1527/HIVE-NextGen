@@ -10,7 +10,7 @@ from PySide6.QtGui import QPainter, QColor, QRadialGradient, QImage, QPixmap
 
 from ui.sidebar import Sidebar
 from ui.workspace import WorkspacePanel
-from ui.player import PlayerPanel
+from ui.player import Player
 from ui.properties import PropertiesPanel
 from ui.timeline.timeline_panel import TimelinePanel
 from utils.shortcut_manager import ShortcutManager
@@ -225,7 +225,7 @@ class MainWindow(QMainWindow):
         self.top_panels_splitter = QSplitter(Qt.Horizontal)
         
         self.panel_workspace = WorkspacePanel()
-        self.panel_player = PlayerPanel()
+        self.panel_player = Player()
         self.panel_properties = PropertiesPanel()
 
         self.top_panels_splitter.addWidget(self.panel_workspace)
