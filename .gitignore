@@ -162,5 +162,5 @@ temp/
 Project-05-06/
 Project-05-08/
 
-# Understand Anything
-.understand-anything/
+# Graphify knowledge graph — generated locally, never committed
+graphify-out/
