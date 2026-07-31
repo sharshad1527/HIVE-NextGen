@@ -164,3 +164,6 @@ Project-05-08/
 
 # Graphify knowledge graph — generated locally, never committed
 graphify-out/
+# Obsidian & Local Wiki ignores
+wiki/.obsidian/
+wiki/graphify-out/
